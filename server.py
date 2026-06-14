@@ -6,11 +6,94 @@ Run:     python server.py
 Register in claude_desktop_config.json (see bottom of file).
 """
 
+import os
 import json
 import datetime
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("MS Project")
+
+# ---------------------------------------------------------------------------
+# Safety / hardening layer
+#
+# Two operator-controlled switches, both read from the environment at startup
+# (outside the model's reach — the model that drives this server cannot change
+# them):
+#
+#   MSPROJECT_SAFE_ROOT  Directory that every file-taking tool is confined to.
+#                        Reads/writes that resolve outside this tree are
+#                        refused. If unset, ALL file operations are refused.
+#   MSPROJECT_DRY_RUN    When truthy ("1"/"true"/"yes"/"on"), mutating tools
+#                        skip the persistent save, and irreversible ops skip the
+#                        mutation entirely, reporting what they *would* have done.
+# ---------------------------------------------------------------------------
+
+SAFE_ROOT = os.environ.get("MSPROJECT_SAFE_ROOT", "").strip()
+DRY_RUN   = os.environ.get("MSPROJECT_DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _resolve_safe_path(file_path, must_exist=False):
+    """Resolve *file_path* and confine it under MSPROJECT_SAFE_ROOT.
+
+    Relative paths are taken relative to the safe root. Returns the absolute,
+    symlink-resolved path. Raises RuntimeError if the safe root is unset, if the
+    resolved path escapes it, or (when must_exist) if the target is missing.
+    """
+    if not SAFE_ROOT:
+        raise RuntimeError(
+            "MSPROJECT_SAFE_ROOT is not set; refusing all file access. Set it to "
+            "the directory that holds your project files before using file tools."
+        )
+    if not file_path or not str(file_path).strip():
+        raise RuntimeError("No file path supplied.")
+
+    root      = os.path.realpath(SAFE_ROOT)
+    raw       = str(file_path)
+    candidate = raw if os.path.isabs(raw) else os.path.join(root, raw)
+    candidate = os.path.realpath(candidate)
+
+    try:
+        within = os.path.commonpath([root, candidate]) == root
+    except ValueError:
+        within = False  # different drives on Windows -> outside the root
+    if not within:
+        raise RuntimeError(
+            f"Path '{file_path}' resolves outside the allowed root ({root}); refused."
+        )
+
+    if must_exist and not os.path.exists(candidate):
+        raise RuntimeError(f"File not found within allowed root: {candidate}")
+    return candidate
+
+
+def _save(app):
+    """Persist the active project, unless dry-run is enabled.
+
+    Returns True if the save happened, False if it was skipped for dry-run.
+    """
+    if DRY_RUN:
+        return False
+    app.FileSave()
+    return True
+
+
+def _launch_app():
+    """Return the running MS Project instance, launching one if necessary.
+
+    Used by tools that legitimately need to start MS Project (e.g. opening a
+    file). DisplayAlerts stays False on purpose: there is no human at the
+    tool-call layer to dismiss a modal COM dialog, so an alert would hang the
+    server indefinitely.
+    """
+    import win32com.client
+    try:
+        return win32com.client.GetActiveObject("MSProject.Application")
+    except Exception:
+        app = win32com.client.Dispatch("MSProject.Application")
+        app.Visible = True
+        app.DisplayAlerts = False
+        return app
+
 
 # ---------------------------------------------------------------------------
 # COM helpers
@@ -191,15 +274,9 @@ def open_project(file_path: str) -> str:
     Open a Microsoft Project file (.mpp or .xml).
     MS Project must already be running (it is launched automatically if not).
     """
-    import win32com.client
-    try:
-        app = win32com.client.GetActiveObject("MSProject.Application")
-    except Exception:
-        app = win32com.client.Dispatch("MSProject.Application")
-        app.Visible = True
-        app.DisplayAlerts = False
-
-    app.FileOpen(file_path)
+    app       = _launch_app()
+    safe_path = _resolve_safe_path(file_path, must_exist=True)
+    app.FileOpen(safe_path)
     proj = app.ActiveProject
     return json.dumps({
         "status":     "opened",
@@ -220,14 +297,7 @@ def new_project(title: str = "New Project", start: str = "") -> str:
         title: Project title (default "New Project").
         start: Project start date as YYYY-MM-DD (optional).
     """
-    import win32com.client
-    try:
-        app = win32com.client.GetActiveObject("MSProject.Application")
-    except Exception:
-        app = win32com.client.Dispatch("MSProject.Application")
-        app.Visible = True
-        app.DisplayAlerts = False
-
+    app = _launch_app()
     app.FileNew()
     proj = app.ActiveProject
     proj.Title = title
@@ -319,7 +389,7 @@ def set_project_properties(properties_json: str) -> str:
     if "status_date" in props and props["status_date"]:
         proj.StatusDate = _parse_date(props["status_date"]); changed.append("status_date")
 
-    app.FileSave()
+    _save(app)
     return json.dumps({"status": "updated", "changed": changed}, indent=2)
 
 
@@ -327,8 +397,9 @@ def set_project_properties(properties_json: str) -> str:
 def save_project() -> str:
     """Save the active project (in place)."""
     app = get_app()
-    app.FileSave()
-    return "Project saved."
+    if _save(app):
+        return "Project saved."
+    return "[dry-run] Save skipped; project left unsaved."
 
 
 @mcp.tool()
@@ -337,17 +408,23 @@ def save_project_as(file_path: str, format: str = "mpp") -> str:
     Save the active project to a new path.
     format: 'mpp' (default), 'xml', 'csv'
     """
-    fmt_map = {"mpp": 0, "xml": 22, "csv": 23}
-    fmt_id  = fmt_map.get(format.lower(), 0)
-    app     = get_app()
-    app.FileSaveAs(Name=file_path, Format=fmt_id, Backup=False, ReadOnly=False)
-    return f"Project saved as: {file_path}"
+    fmt_map   = {"mpp": 0, "xml": 22, "csv": 23}
+    fmt_id    = fmt_map.get(format.lower(), 0)
+    app       = get_app()
+    safe_path = _resolve_safe_path(file_path)
+    if DRY_RUN:
+        return f"[dry-run] Would save project as: {safe_path} (format={format})"
+    app.FileSaveAs(Name=safe_path, Format=fmt_id, Backup=False, ReadOnly=False)
+    return f"Project saved as: {safe_path}"
 
 
 @mcp.tool()
 def close_project(save: bool = False) -> str:
     """Close the active project. Set save=True to save before closing."""
     app = get_app()
+    if save and DRY_RUN:
+        app.FileClose(Save=0)
+        return "[dry-run] Project closed without saving (save suppressed by dry-run)."
     app.FileClose(Save=1 if save else 0)
     return "Project closed."
 
@@ -561,7 +638,7 @@ def update_task(
             if tt is not None:
                 t.Type = tt;            changed.append("type")
 
-        app.FileSave()
+        _save(app)
         return json.dumps({
             "status":   "updated",
             "unique_id": unique_id,
@@ -597,7 +674,7 @@ def bulk_update_rag(updates: str) -> str:
         else:
             results.append({"unique_id": uid, "status": "not_found"})
 
-    app.FileSave()
+    _save(app)
     return json.dumps({"updated": len([r for r in results if r["status"] == "updated"]),
                        "results": results}, indent=2)
 
@@ -657,7 +734,7 @@ def bulk_update_tasks(updates_json: str) -> str:
         app.CalculateProject()
         app.Calculation = -1
 
-    app.FileSave()
+    _save(app)
     return json.dumps({
         "updated":   updated,
         "not_found": not_found,
@@ -722,7 +799,7 @@ def add_task(
         app.CalculateProject()
         app.Calculation = -1
 
-    app.FileSave()
+    _save(app)
     return json.dumps({
         "status":    "created",
         "unique_id": task.UniqueID,
@@ -792,7 +869,7 @@ def bulk_add_tasks(tasks_json: str) -> str:
         app.CalculateProject()
         app.Calculation = -1
 
-    app.FileSave()
+    _save(app)
     return json.dumps({
         "created": len(created),
         "tasks":   created,
@@ -809,9 +886,15 @@ def delete_task(unique_id: int) -> str:
         if t is not None and t.UniqueID == unique_id:
             task_name = t.Name
             task_id   = t.ID
+            if DRY_RUN:
+                return json.dumps({
+                    "status":                 "dry-run",
+                    "would_delete_unique_id": unique_id,
+                    "name":                   task_name,
+                }, indent=2)
             app.SelectRow(task_id, False)
             app.EditDelete()
-            app.FileSave()
+            _save(app)
             return json.dumps({
                 "status":    "deleted",
                 "unique_id": unique_id,
@@ -840,7 +923,7 @@ def set_task_mode(unique_id: int, manual: bool = True) -> str:
     for t in proj.Tasks:
         if t is not None and t.UniqueID == unique_id:
             t.Manual = manual
-            app.FileSave()
+            _save(app)
             return json.dumps({
                 "status":    "updated",
                 "unique_id": unique_id,
@@ -895,7 +978,7 @@ def bulk_set_task_mode(updates_json: str) -> str:
                 t.Manual = item.get("manual", True)
                 updated += 1
 
-    app.FileSave()
+    _save(app)
     return json.dumps({"updated": updated}, indent=2)
 
 
@@ -926,7 +1009,7 @@ def set_constraint(unique_id: int, constraint_type: str = "SNET", constraint_dat
             t.ConstraintType = CONSTRAINT_MAP[ct]
             if constraint_date and ct not in ("ASAP", "ALAP"):
                 t.ConstraintDate = _parse_date(constraint_date)
-            app.FileSave()
+            _save(app)
             return json.dumps({
                 "status":          "updated",
                 "unique_id":       unique_id,
@@ -956,7 +1039,7 @@ def clear_estimated_flags() -> str:
             except Exception:
                 pass
 
-    app.FileSave()
+    _save(app)
     return json.dumps({"status": "cleared", "tasks_updated": count}, indent=2)
 
 
@@ -1048,7 +1131,7 @@ def add_predecessor(
     else:
         succ_task.Predecessors = new_pred
 
-    app.FileSave()
+    _save(app)
     return json.dumps({
         "status":       "linked",
         "successor":    successor_unique_id,
@@ -1110,7 +1193,7 @@ def bulk_add_predecessors(links_json: str) -> str:
 
         linked += 1
 
-    app.FileSave()
+    _save(app)
     return json.dumps({
         "linked": linked,
         "errors": errors,
@@ -1146,7 +1229,7 @@ def remove_predecessor(
     filtered  = [p for p in parts if not p.startswith(str(pred_id))]
     succ_task.Predecessors = ",".join(filtered)
 
-    app.FileSave()
+    _save(app)
     return json.dumps({
         "status":              "unlinked",
         "successor":           successor_unique_id,
@@ -1261,7 +1344,7 @@ def add_resource(
     if cost_per_use > 0:
         r.CostPerUse = cost_per_use
 
-    app.FileSave()
+    _save(app)
     return json.dumps({
         "status":    "created",
         "unique_id": r.UniqueID,
@@ -1314,7 +1397,7 @@ def assign_resource(task_unique_id: int, resource_name: str, units: float = 1.0)
     else:
         task.ResourceNames = resource_name
 
-    app.FileSave()
+    _save(app)
     return json.dumps({
         "status":         "assigned",
         "task_unique_id": task_unique_id,
@@ -1442,7 +1525,7 @@ def indent_task(unique_id: int, direction: str = "indent") -> str:
                 app.OutlineOutdent()
             else:
                 app.OutlineIndent()
-            app.FileSave()
+            _save(app)
             return json.dumps({
                 "status":    "updated",
                 "unique_id": unique_id,
@@ -1629,7 +1712,7 @@ def save_baseline(baseline_number: int = 0, all_tasks: bool = True) -> str:
     task_count = sum(1 for t in proj.Tasks if t is not None)
 
     app.BaselineSave(All=all_tasks, Copy=baseline_number, Into=baseline_number)
-    app.FileSave()
+    _save(app)
 
     return json.dumps({
         "status":          "saved",
@@ -1652,8 +1735,14 @@ def clear_baseline(baseline_number: int = 0, all_tasks: bool = True) -> str:
         return json.dumps({"error": "baseline_number must be 0-10."})
 
     app = get_app()
+    if DRY_RUN:
+        return json.dumps({
+            "status":              "dry-run",
+            "would_clear_baseline": baseline_number,
+            "all_tasks":           all_tasks,
+        }, indent=2)
     app.BaselineClear(All=all_tasks, From=baseline_number)
-    app.FileSave()
+    _save(app)
 
     return json.dumps({
         "status":          "cleared",
@@ -2106,7 +2195,7 @@ def set_calendar_exception(
     except Exception as e:
         return json.dumps({"error": f"Failed to set exception: {e}"})
 
-    app.FileSave()
+    _save(app)
     return json.dumps({
         "status":   "created",
         "calendar": calendar_name,
@@ -2187,7 +2276,7 @@ def set_project_calendar(calendar_name: str) -> str:
     if not set_ok:
         return json.dumps({"error": f"Could not set calendar. Tried: {errors}"})
 
-    app.FileSave()
+    _save(app)
 
     return json.dumps({
         "status":   "updated",
@@ -2246,7 +2335,7 @@ def update_custom_fields(unique_id: int, fields_json: str) -> str:
         except Exception as e:
             errors.append({"field": field_name, "error": str(e)})
 
-    app.FileSave()
+    _save(app)
     return json.dumps({
         "status":    "updated",
         "unique_id": unique_id,
@@ -2620,7 +2709,7 @@ def level_resources() -> str:
     proj = get_proj(app)
 
     app.LevelNow()
-    app.FileSave()
+    _save(app)
 
     return json.dumps({
         "status":  "leveled",
@@ -2651,7 +2740,7 @@ def set_deadline(unique_id: int, deadline_date: str) -> str:
 
     if deadline_date.lower() == "clear":
         t.Deadline = "NA"
-        app.FileSave()
+        _save(app)
         return json.dumps({
             "status":    "cleared",
             "unique_id": unique_id,
@@ -2661,7 +2750,7 @@ def set_deadline(unique_id: int, deadline_date: str) -> str:
 
     dl = _parse_date(deadline_date)
     t.Deadline = dl
-    app.FileSave()
+    _save(app)
 
     deadline_missed = False
     try:
@@ -2698,7 +2787,7 @@ def set_task_active(unique_id: int, active: bool = True) -> str:
         return json.dumps({"error": f"Task UniqueID {unique_id} not found."})
 
     t.Active = active
-    app.FileSave()
+    _save(app)
 
     return json.dumps({
         "status":    "updated",
@@ -3376,8 +3465,17 @@ def export_csv(output_path: str, columns_json: str = "", filters_json: str = "")
             if t is not None:
                 tasks.append(task_to_dict(t, proj))
 
+    safe_path = _resolve_safe_path(output_path)
+    if DRY_RUN:
+        return json.dumps({
+            "status":  "dry-run",
+            "path":    safe_path,
+            "rows":    len(tasks),
+            "columns": columns,
+        }, indent=2)
+
     # Write CSV
-    with open(output_path, "w", newline="", encoding="utf-8") as fp:
+    with open(safe_path, "w", newline="", encoding="utf-8") as fp:
         writer = csv.writer(fp)
         writer.writerow(columns)
         for task in tasks:
@@ -3386,7 +3484,7 @@ def export_csv(output_path: str, columns_json: str = "", filters_json: str = "")
 
     return json.dumps({
         "status":  "exported",
-        "path":    output_path,
+        "path":    safe_path,
         "rows":    len(tasks),
         "columns": columns,
     }, indent=2)
@@ -3710,12 +3808,17 @@ def insert_subproject(file_path: str, after_unique_id: int = 0) -> str:
         file_path:       Full path to the .mpp file to insert (required).
         after_unique_id: Insert after this task's UniqueID (0 = insert at end).
     """
-    import os
-    if not os.path.exists(file_path):
-        return json.dumps({"error": f"File not found: {file_path}"})
+    safe_path = _resolve_safe_path(file_path, must_exist=True)
 
     app  = get_app()
     proj = get_proj(app)
+
+    if DRY_RUN:
+        return json.dumps({
+            "status":          "dry-run",
+            "would_insert":    safe_path,
+            "after_unique_id": after_unique_id or "end",
+        }, indent=2)
 
     count_before = proj.Tasks.Count
 
@@ -3723,7 +3826,7 @@ def insert_subproject(file_path: str, after_unique_id: int = 0) -> str:
     # (SubprojectInsert is not reliably exposed via COM in all versions.)
     try:
         import os as _os
-        basename = _os.path.splitext(_os.path.basename(file_path))[0]
+        basename = _os.path.splitext(_os.path.basename(safe_path))[0]
         if after_unique_id > 0:
             t = _find_task(proj, after_unique_id)
             if t is None:
@@ -3732,7 +3835,7 @@ def insert_subproject(file_path: str, after_unique_id: int = 0) -> str:
             new_t = proj.Tasks.Add(basename)
         else:
             new_t = proj.Tasks.Add(basename)
-        new_t.SubProject = file_path
+        new_t.SubProject = safe_path
     except Exception as e:
         return json.dumps({"error": f"Failed to insert subproject: {e}"})
 
@@ -3740,7 +3843,7 @@ def insert_subproject(file_path: str, after_unique_id: int = 0) -> str:
 
     return json.dumps({
         "status":           "inserted",
-        "file_path":        file_path,
+        "file_path":        safe_path,
         "inserted_after":   after_unique_id or "end",
         "task_count_before": count_before,
         "task_count_after":  count_after,
@@ -3822,12 +3925,22 @@ def snapshot_to_json(output_path: str, include_resources: bool = True) -> str:
         "resources": resources,
     }
 
-    with open(output_path, "w", encoding="utf-8") as fp:
+    safe_path = _resolve_safe_path(output_path)
+    if DRY_RUN:
+        return json.dumps({
+            "status":    "dry-run",
+            "path":      safe_path,
+            "tasks":     len(tasks),
+            "resources": len(resources),
+            "project":   project_meta["name"],
+        }, indent=2)
+
+    with open(safe_path, "w", encoding="utf-8") as fp:
         json.dump(snapshot, fp, indent=2, default=str)
 
     return json.dumps({
         "status":    "exported",
-        "path":      output_path,
+        "path":      safe_path,
         "tasks":     len(tasks),
         "resources": len(resources),
         "project":   project_meta["name"],
@@ -3885,6 +3998,13 @@ def delete_resource(resource_name: str) -> str:
     if target is None:
         return json.dumps({"error": f"Resource '{resource_name}' not found."})
 
+    if DRY_RUN:
+        return json.dumps({
+            "status":       "dry-run",
+            "would_delete": target.Name,
+            "assignments":  target.Assignments.Count,
+        }, indent=2)
+
     # Clear assignments first
     assignments_cleared = 0
     # Iterate in reverse to avoid index shifting
@@ -3901,7 +4021,7 @@ def delete_resource(resource_name: str) -> str:
     except Exception as e:
         return json.dumps({"error": f"Failed to delete resource: {e}"})
 
-    app.FileSave()
+    _save(app)
     return json.dumps({
         "status":              "deleted",
         "name":                name,
@@ -4076,7 +4196,7 @@ def update_project(complete_through: str, set_0_or_100: bool = False) -> str:
             app.UpdateProject(True, dt)
         except Exception:
             app.UpdateProject(dt)
-    app.FileSave()
+    _save(app)
 
     return json.dumps({
         "status": "updated",
@@ -4116,7 +4236,7 @@ def reschedule_incomplete_work(reschedule_from: str = "") -> str:
             app.UpdateProject(True, dt)
         except Exception:
             proj.StatusDate = dt  # At minimum set the status date
-    app.FileSave()
+    _save(app)
 
     return json.dumps({
         "status": "rescheduled",
@@ -4145,8 +4265,10 @@ def delete_calendar(calendar_name: str) -> str:
 
     for c in proj.BaseCalendars:
         if c is not None and str(c.Name).lower() == calendar_name.lower():
+            if DRY_RUN:
+                return json.dumps({"status": "dry-run", "would_delete_calendar": calendar_name})
             c.Delete()
-            app.FileSave()
+            _save(app)
             return json.dumps({"status": "deleted", "calendar": calendar_name})
 
     return json.dumps({"error": f"Calendar '{calendar_name}' not found."})
@@ -4175,8 +4297,14 @@ def delete_calendar_exception(calendar_name: str, exception_name: str) -> str:
     try:
         for exc in cal.Exceptions:
             if str(exc.Name).lower() == exception_name.lower():
+                if DRY_RUN:
+                    return json.dumps({
+                        "status":              "dry-run",
+                        "calendar":            calendar_name,
+                        "would_delete_exception": exception_name,
+                    })
                 exc.Delete()
-                app.FileSave()
+                _save(app)
                 return json.dumps({
                     "status":    "deleted",
                     "calendar":  calendar_name,
@@ -4212,7 +4340,7 @@ def set_resource_calendar(resource_name: str, calendar_name: str) -> str:
     for r in proj.Resources:
         if r is not None and r.Name and r.Name.lower() == resource_name.lower():
             r.BaseCalendar = calendar_name
-            app.FileSave()
+            _save(app)
             return json.dumps({
                 "status":   "updated",
                 "resource": r.Name,
@@ -4323,7 +4451,7 @@ def set_working_hours(calendar_name: str, day: int, shifts_json: str) -> str:
     if not shifts:
         # Mark as non-working
         wd.Working = False
-        app.FileSave()
+        _save(app)
         return json.dumps({
             "status":   "updated",
             "calendar": cal.Name,
@@ -4355,7 +4483,7 @@ def set_working_hours(calendar_name: str, day: int, shifts_json: str) -> str:
         except Exception:
             pass
 
-    app.FileSave()
+    _save(app)
     return json.dumps({
         "status":   "updated",
         "calendar": cal.Name,
@@ -4562,7 +4690,7 @@ def set_task_hyperlink(unique_id: int, url: str, text: str = "", sub_address: st
     if sub_address:
         t.HyperlinkSubAddress = sub_address
 
-    app.FileSave()
+    _save(app)
     return json.dumps({
         "status":    "updated",
         "unique_id": unique_id,
@@ -4644,7 +4772,7 @@ def add_recurring_task(
             occurrence_uids.append(occ.UniqueID)
 
         app.CalculateProject()
-        app.FileSave()
+        _save(app)
 
         return json.dumps({
             "status":          "created",
@@ -4765,7 +4893,7 @@ def set_resource_rate_table(
             if cost_per_use >= 0:
                 first.CostPerUse = cost_per_use
 
-        app.FileSave()
+        _save(app)
         return json.dumps({
             "status":   "updated",
             "resource": res.Name,

@@ -21,7 +21,11 @@ Control Microsoft Project via COM automation through the Model Context Protocol 
   "mcpServers": {
     "msproject": {
       "command": "python",
-      "args": ["/path/to/msproject/server.py"]
+      "args": ["/path/to/msproject/server.py"],
+      "env": {
+        "MSPROJECT_SAFE_ROOT": "C:\\Projects",
+        "MSPROJECT_DRY_RUN": "0"
+      }
     }
   }
 }
@@ -32,6 +36,38 @@ Control Microsoft Project via COM automation through the Model Context Protocol 
 ```bash
 python server.py
 ```
+
+## Security & configuration
+
+This server drives a local MS Project install with the privileges of the
+Windows user running it, and the model that calls the tools is the one choosing
+file paths. Two environment variables, read once at startup (so the model
+cannot change them), contain the blast radius:
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `MSPROJECT_SAFE_ROOT` | Directory that **every** file-taking tool is confined to. Relative paths resolve under it; paths that resolve outside it (via `..`, absolute paths, or another drive) are refused. **If unset, all file operations are refused.** | unset → file ops blocked |
+| `MSPROJECT_DRY_RUN` | When truthy (`1`/`true`/`yes`/`on`), mutating tools skip the save and irreversible ops (`delete_task`, `delete_resource`, `clear_baseline`, `delete_calendar`, `delete_calendar_exception`) skip the COM mutation entirely, returning a `"status": "dry-run"` preview of what they *would* have done. | off |
+
+Tools affected by `MSPROJECT_SAFE_ROOT`: `open_project`, `save_project_as`,
+`import_xml`, `export_xml`, `export_csv`, `snapshot_to_json`, `insert_subproject`.
+
+**Threats this does and does not address.** Path-confinement stops arbitrary
+read/write/overwrite across the filesystem, and dry-run gives a safe way to
+preview mutations. It does **not** neutralise *indirect prompt injection*: task
+names, notes, and custom fields read out of a third-party `.mpp`/`.xml` are
+returned to the model, which also holds write/delete tools. Treat untrusted
+project files as untrusted input — run them with `MSPROJECT_DRY_RUN=1` first, or
+point `MSPROJECT_SAFE_ROOT` at a throwaway directory.
+
+> `DisplayAlerts` is intentionally left **off** while the server drives MS
+> Project: there is no human at the tool-call layer to dismiss a modal COM
+> dialog, so an alert would hang the server. The env switches above are the
+> intended guardrail instead.
+
+**Running the integration tests** (`tests/`) requires a live MS Project install
+and now also requires `MSPROJECT_SAFE_ROOT` to point at a writable scratch
+directory with `MSPROJECT_DRY_RUN=0`, since they open and save real files.
 
 ## Tool Inventory (99 tools)
 
