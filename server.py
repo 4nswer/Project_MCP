@@ -5315,8 +5315,10 @@ def what_if_delay(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    print("Starting MS Project MCP Server...")
-    print("MS Project must be running with a file open before using tools.")
+    import sys
+    # stdout is the JSON-RPC channel for the stdio transport; log to stderr only.
+    print("Starting MS Project MCP Server...", file=sys.stderr)
+    print("MS Project must be running with a file open before using tools.", file=sys.stderr)
     mcp.run()
 
 
