@@ -1,35 +1,52 @@
 ---
 type: memory-bank
 tier: context
-updated: <!-- YYYY-MM-DD -->
+updated: 2026-06-15
 ---
 
 # Tech Context
 
-> **The "stack".** Builds on [[projectbrief]]. What this project is made of and what it
-> depends on — so a fresh session knows the tools, parts, and constraints without
-> re-discovering them.
+> **The "stack".** Builds on [[projectbrief]].
 
 ## Technologies / tools
-<!-- Software: languages, frameworks, libraries, build tools.
-     Machine: CAD package, PLC/controller platform, simulation tools, programming env. -->
--
+
+- **Python 3.10+** — single-file server, [server.py](../server.py).
+- **MCP / FastMCP** (`mcp` package, `mcp.server.fastmcp.FastMCP`) — MCP server framework;
+  runs over stdio via `mcp.run()`.
+- **pywin32** — COM automation bridge to MS Project on Windows.
+- **python-dateutil** (optional) — only needed for `add_recurring_task` recurrence math.
+- **Microsoft Project** desktop, Windows (tested on **16.0**) — must be running.
 
 ## Key components / materials
-<!-- Machine: actuators, motors, drives, sensors, structural materials, bought-in modules,
-     critical part numbers. Software: major dependencies/services. -->
-| Item | Spec / part no. | Supplier | Notes |
-|------|-----------------|----------|-------|
-|      |                 |          |       |
+
+| Item | Spec / version | Source | Notes |
+|------|----------------|--------|-------|
+| MS Project | desktop 16.0 | Microsoft | Windows-only; COM target; must be running |
+| Python | 3.10+ | python.org | |
+| mcp | latest | `pip install mcp` | FastMCP framework |
+| pywin32 | latest | `pip install pywin32` | COM access |
+| python-dateutil | optional | `pip install python-dateutil` | recurring tasks only |
 
 ## Suppliers & references
-<!-- Who supplies what; datasheet locations (remember: PDFs live outside git — see _Index.md). -->
--
+
+- README: [README.md](../README.md) — full 99-tool inventory + known limitations.
+- Contributing/conventions: [CONTRIBUTING.md](../CONTRIBUTING.md).
+- No external binary assets currently tracked (see [[_Index]]).
 
 ## Setup / environment
-<!-- How to get a working environment or recreate the toolchain. -->
+
+1. Windows with MS Project installed and **running** (open a file, or the server can
+   create one).
+2. `pip install mcp pywin32` (+ `python-dateutil` for recurring tasks).
+3. Register in `claude_desktop_config.json` under `mcpServers.msproject` →
+   `python /path/to/server.py`, OR run standalone `python server.py`.
+4. Tests: `python tests/test_phaseN.py` — all require MS Project running.
 
 ## Constraints & dependencies
-<!-- Standards (e.g. CE, ISO), voltage/air supply, interfaces to existing equipment,
-     version locks, anything that limits choices. -->
--
+
+- **Windows + COM only** — no cross-platform support.
+- Single COM connection — don't open MS Project GUI dialogs while the server is active
+  (file locking); proxies go stale across projects → `switch_project` first.
+- `undo_last` supports up to 10 consecutive undos (COM undo less reliable than UI).
+- `get_timephased_data` slow on large ranges — keep to weeks/months.
+- Gitignored: `__pycache__/`, `*.pyc`, `*.pyo`, `.env` (see [.gitignore](../.gitignore)).
