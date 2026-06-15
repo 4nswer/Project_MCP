@@ -38,12 +38,23 @@ updated: 2026-06-15
 1. Windows with MS Project installed and **running** (open a file, or the server can
    create one).
 2. `pip install mcp pywin32` (+ `python-dateutil` for recurring tasks).
-3. Register in `claude_desktop_config.json` under `mcpServers.msproject` →
-   `python /path/to/server.py`, OR run standalone `python server.py`.
-4. Tests: `python tests/test_phaseN.py` — all require MS Project running.
+3. Set environment variables (read once at startup):
+   - **`MSPROJECT_SAFE_ROOT`** — directory every file-taking tool is confined to.
+     **Required**: if unset, all file operations are refused. Set to the folder holding
+     your project files (e.g. `C:\Projects`).
+   - **`MSPROJECT_DRY_RUN`** — optional; `1`/`true`/`yes`/`on` makes mutating tools skip
+     saves and irreversible deletions return a preview. Default off.
+4. Register in `claude_desktop_config.json` under `mcpServers.msproject` →
+   `python /path/to/server.py` (pass the env vars in the `env` block), OR run standalone
+   `python server.py`.
+5. Tests: `python tests/test_phaseN.py` — all require MS Project running, **and now
+   require `MSPROJECT_SAFE_ROOT`** pointing at a writable scratch dir with
+   `MSPROJECT_DRY_RUN=0` (they open and save real files).
 
 ## Constraints & dependencies
 
+- **`MSPROJECT_SAFE_ROOT` must be set** or every file-taking tool refuses to run
+  (fail-closed). See [[systemPatterns]] for the safety layer.
 - **Windows + COM only** — no cross-platform support.
 - Single COM connection — don't open MS Project GUI dialogs while the server is active
   (file locking); proxies go stale across projects → `switch_project` first.

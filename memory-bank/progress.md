@@ -10,6 +10,9 @@ updated: 2026-06-15
 
 ## What works / is done
 
+- **Safety hardening layer** (merged into `main` 2026-06-15): `MSPROJECT_SAFE_ROOT` path
+  allow-list, `MSPROJECT_DRY_RUN` switch, short-circuited irreversible deletions,
+  stderr startup banner. `server.py` compiles; merge clean. See [[systemPatterns]].
 - **99 MCP tools** spanning the full PM lifecycle (see [README](../README.md) inventory).
 - Enriched task data (35+ fields) returned by all task queries.
 - **202 tests across 7 suites**, all passing against a live MS Project:
@@ -26,10 +29,17 @@ updated: 2026-06-15
 
 ## Current status
 
-**Stable / feature-complete checkpoint.** All 7 phases shipped and tested; clean working
-tree on `main`.
+**Stable checkpoint with hardening merged.** All 7 phases + safety layer on `main`; clean
+working tree. **Local `main` not yet pushed**; merge not yet re-tested on Windows.
 
 ## Known issues & open problems
+
+- **Hardening not re-tested on a live MS Project** since the merge — test suites need a
+  Windows machine and now require `MSPROJECT_SAFE_ROOT` set.
+- **Fail-closed file access**: file tools refuse to run if `MSPROJECT_SAFE_ROOT` is unset
+  (by design — but a deployment/test gotcha).
+- **Indirect prompt injection** from untrusted `.mpp`/`.xml` files is a documented
+  residual risk the safety layer does *not* fully eliminate.
 
 - **COM proxy staleness** across multiple open projects → must `switch_project` first.
 - **Undo** limited to 10 consecutive undos; COM undo less reliable than the GUI.

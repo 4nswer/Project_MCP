@@ -33,4 +33,5 @@ the test suites; no permanent external binaries are tracked._
 |       |      |                        |       |
 
 ## Key raw notes worth keeping handy
-- _None yet — `raw/` is empty (only `.gitkeep` files)._
+- [2026-06-15 session](../raw/sessions/2026-06-15.md) — Memory Bank init + hardening merge
+  details (env-var semantics, affected tools, merge mechanics).

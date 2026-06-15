@@ -11,11 +11,16 @@ updated: 2026-06-15
 
 ## Current focus
 
-Phase 7 is complete (99 tools). Memory Bank just initialised. No active feature in
-progress — the codebase is at a stable, fully-tested checkpoint.
+`hardening` branch merged into `main`. Codebase is at a stable checkpoint with the new
+safety layer in place. No active feature in progress.
 
 ## Recent changes
 
+- (2026-06-15) Merged `origin/hardening` into `main` (merge commit `72b1170`, clean,
+  no conflicts). Brought in the **safety hardening layer** (`MSPROJECT_SAFE_ROOT` path
+  allow-list, `MSPROJECT_DRY_RUN` switch, short-circuited irreversible deletions,
+  `_launch_app()` COM-dispatch unification) and the stderr startup-banner fix. Verified:
+  Memory Bank intact, `server.py` compiles, still 99 tools. **Not yet pushed.**
 - (2026-06-15) Initialised the Memory Bank from README + code.
 - (2026-06-15) Added Memory Bank scaffold to the repo (commit `b195491`).
 - (2026-06-15) **Phase 7** (commit `f5603bb`): critical-path sequence, period filtering,
@@ -25,13 +30,21 @@ progress — the codebase is at a stable, fully-tested checkpoint.
 
 ## Next steps
 
-- [ ] No committed next feature. Candidate directions if work resumes: more reporting
-      tools, performance work on `get_timephased_data`, or hardening COM error handling.
+- [ ] **Push `main`** to origin (local is ahead by the merge + 2 hardening commits) —
+      awaiting user go-ahead.
+- [ ] **Run the test suites** on a Windows machine with MS Project to validate the merge;
+      the hardening layer reworked file paths and COM dispatch. Remember to set
+      `MSPROJECT_SAFE_ROOT` (scratch dir) and `MSPROJECT_DRY_RUN=0` first.
 - [ ] If touching code: follow the `@mcp.tool()` + `get_app()`/`get_proj()` + JSON-return
-      pattern, add a test to the matching phase suite, run all suites against live MS Project.
+      pattern, route file paths through `_resolve_safe_path()`, persist via `_save()`, add
+      a test to the matching phase suite.
 
 ## Active decisions & considerations
 
 - Single-file `server.py` is intentional (~5,200 lines) — no plan to split into a package
   yet; revisit only if it becomes unmanageable.
 - Recurring tasks remain simulated (COM dialog limitation) — known acceptable trade-off.
+- **Fail-closed file access**: unset `MSPROJECT_SAFE_ROOT` blocks all file tools by
+  design. Watch for confusion if a fresh deployment/test run forgets to set it.
+- Indirect prompt injection from untrusted `.mpp`/`.xml` is an accepted, documented
+  residual risk (path-confinement + dry-run mitigate but don't eliminate it).
