@@ -50,7 +50,7 @@ cannot change them), contain the blast radius:
 | `MSPROJECT_DRY_RUN` | When truthy (`1`/`true`/`yes`/`on`), mutating tools skip the save and irreversible ops (`delete_task`, `delete_resource`, `clear_baseline`, `delete_calendar`, `delete_calendar_exception`) skip the COM mutation entirely, returning a `"status": "dry-run"` preview of what they *would* have done. | off |
 
 Tools affected by `MSPROJECT_SAFE_ROOT`: `open_project`, `save_project_as`,
-`import_xml`, `export_xml`, `export_csv`, `snapshot_to_json`, `insert_subproject`.
+`export_csv`, `snapshot_to_json`, `insert_subproject`.
 
 **Threats this does and does not address.** Path-confinement stops arbitrary
 read/write/overwrite across the filesystem, and dry-run gives a safe way to
@@ -69,7 +69,26 @@ point `MSPROJECT_SAFE_ROOT` at a throwaway directory.
 and now also requires `MSPROJECT_SAFE_ROOT` to point at a writable scratch
 directory with `MSPROJECT_DRY_RUN=0`, since they open and save real files.
 
-## Tool Inventory (104 tools)
+## Usage & discoverability
+
+The server ships `instructions` (sent to the client at init) and a `get_tool_guide`
+tool that together steer tool selection:
+
+- **Batching rule** — when acting on **2 or more** tasks/links/assignments in one
+  intent, call the matching `bulk_*` tool **once** rather than looping the single-item
+  tool. Bulk tools suspend auto-recalculation and use one save round-trip, so they are
+  faster and safer. Each single tool's description points to its bulk counterpart.
+- **Annotations** — every tool carries MCP `ToolAnnotations` (`title`, `readOnlyHint`,
+  `destructiveHint`, `idempotentHint`) so clients can distinguish reads from
+  destructive mutations.
+- **`get_tool_guide`** — a read-only tool returning the category map, efficiency rules,
+  and the full single→bulk map. Call it when unsure which tool to use.
+
+**Breaking change (v-current):** the thin wrapper tools `import_xml`, `export_xml`, and
+`search_tasks` were removed. Use `open_project` (opens `.xml` directly),
+`save_project_as(path, format="xml")`, and `get_tasks(keyword="…")` instead.
+
+## Tool Inventory (101 tools)
 
 ### Project Management (7)
 
@@ -83,7 +102,7 @@ directory with `MSPROJECT_DRY_RUN=0`, since they open and save real files.
 | `save_project_as` | Save as .mpp or .xml |
 | `close_project` | Close the active project |
 
-### Task Queries (9)
+### Task Queries (8)
 
 | Tool | Description |
 |------|-------------|
@@ -93,7 +112,6 @@ directory with `MSPROJECT_DRY_RUN=0`, since they open and save real files.
 | `get_tasks_by_rag` | Filter tasks by RAG status (Text1) |
 | `get_overdue_tasks` | Incomplete tasks past their finish date |
 | `get_tasks_by_resource` | Tasks assigned to a named resource |
-| `search_tasks` | Full-text search across task names |
 | `get_progress_summary` | Dashboard: progress, RAG counts, overdue |
 | `get_wbs_structure` | Hierarchical WBS tree |
 
@@ -163,12 +181,13 @@ directory with `MSPROJECT_DRY_RUN=0`, since they open and save real files.
 | `bulk_update_custom_fields` | Set custom field values across multiple tasks |
 | `get_custom_field_values` | Read all values of a custom field |
 
-### Import / Export (6)
+### Import / Export (4)
+
+> XML import/export is folded into `open_project` (opens `.xml` directly) and
+> `save_project_as(path, format="xml")`. Task search is folded into `get_tasks(keyword="…")`.
 
 | Tool | Description |
 |------|-------------|
-| `import_xml` | Import from MS Project XML |
-| `export_xml` | Export to MS Project XML |
 | `export_csv` | Export tasks to CSV with column selection |
 | `snapshot_to_json` | Full project snapshot as JSON |
 | `snapshot_diff` | Compare two JSON snapshots — additions, deletions, changes |
@@ -340,6 +359,7 @@ Single-file server (`server.py`, ~5,400 lines) using the FastMCP framework. All 
 | 6 | 96 | Timephased data, calendar management, resource availability, variance reporting |
 | 7 | 99 | Critical path intelligence: ordered sequence, period filtering, what-if analysis |
 | 8 | 104 | Bulk-operation completeness: 4 new bulk tools + `get_tool_guide` routing meta-tool, docstring redirects on all single-item/bulk pairs |
+| 9 | 101 | Discoverability pass: server `instructions`, `ToolAnnotations` on every tool, single↔bulk cross-references, docstring normalization; removed 3 thin wrappers (`import_xml`, `export_xml`, `search_tasks`) |
 
 ## Contributing
 

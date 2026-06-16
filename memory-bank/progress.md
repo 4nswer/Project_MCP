@@ -1,7 +1,7 @@
 ---
 type: memory-bank
 tier: active
-updated: 2026-06-15
+updated: 2026-06-16
 ---
 
 # Progress
@@ -13,7 +13,12 @@ updated: 2026-06-15
 - **Safety hardening layer** (merged into `main` 2026-06-15): `MSPROJECT_SAFE_ROOT` path
   allow-list, `MSPROJECT_DRY_RUN` switch, short-circuited irreversible deletions,
   stderr startup banner. `server.py` compiles; merge clean. See [[systemPatterns]].
-- **99 MCP tools** spanning the full PM lifecycle (see [README](../README.md) inventory).
+- **101 MCP tools** spanning the full PM lifecycle (see [README](../README.md) inventory).
+  Phase 8 added bulk-completeness tools + `get_tool_guide` (→104); the 2026-06-16
+  discoverability pass removed 3 thin wrappers (→101).
+- **Discoverability/normalization pass** (2026-06-16, uncommitted): server `instructions`,
+  `ToolAnnotations` on every tool, single↔bulk cross-references, docstring normalization,
+  removal of `import_xml`/`export_xml`/`search_tasks`. `py_compile` + introspection pass.
 - Enriched task data (35+ fields) returned by all task queries.
 - **202 tests across 7 suites**, all passing against a live MS Project:
   `test_new_tools.py` (11), `test_phase2.py` (10), `test_phase3.py` (15),
@@ -29,8 +34,9 @@ updated: 2026-06-15
 
 ## Current status
 
-**Stable checkpoint with hardening merged.** All 7 phases + safety layer on `main`; clean
-working tree. **Local `main` not yet pushed**; merge not yet re-tested on Windows.
+**Stable checkpoint with hardening merged + discoverability pass staged.** All phases +
+safety layer on `main`; the 2026-06-16 discoverability pass is in the working tree
+(uncommitted). **Local `main` not yet pushed**; merge + pass not yet re-tested on Windows.
 
 ## Known issues & open problems
 

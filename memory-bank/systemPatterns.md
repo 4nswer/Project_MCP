@@ -66,9 +66,9 @@ Connectivity. All share the same COM-access and date helpers.
 - COM access: always `app = get_app()` then `proj = get_proj(app)`; `_launch_app()` is
   the single COM-dispatch helper used by tools that may need to start MS Project.
 - File-taking tools must route paths through `_resolve_safe_path()`; mutating tools persist
-  via `_save()` (dry-run aware). The seven file tools confined to the safe root:
-  `open_project`, `save_project_as`, `import_xml`, `export_xml`, `export_csv`,
-  `snapshot_to_json`, `insert_subproject`.
+  via `_save()` (dry-run aware). The five file tools confined to the safe root:
+  `open_project` (also opens `.xml`), `save_project_as` (also exports xml/csv),
+  `export_csv`, `snapshot_to_json`, `insert_subproject`.
 - Dates: `_parse_date()` for `YYYY-MM-DD` input → COM; `_fmt_date()` for output;
   `_to_naive()` before comparing COM dates.
 - Every tool returns `json.dumps({...}, indent=2)`; docstrings ARE the tool descriptions.

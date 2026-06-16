@@ -10,8 +10,38 @@ import os
 import json
 import datetime
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
-mcp = FastMCP("MS Project")
+SERVER_INSTRUCTIONS = """
+Controls Microsoft Project via COM automation. MS Project must be running with a project open.
+
+BATCHING RULE — when acting on 2 or more tasks/links/assignments in a single intent, ALWAYS
+call the matching bulk_* tool once. Never loop the single-item tool. The bulk tools suspend
+auto-recalculation and use one save round-trip, so they are both faster and safer.
+
+Single → Bulk pairs:
+  add_task              → bulk_add_tasks
+  update_task           → bulk_update_tasks  (or bulk_update_rag for RAG status only)
+  add_predecessor       → bulk_add_predecessors
+  remove_predecessor    → bulk_remove_predecessors
+  set_task_mode         → bulk_set_task_mode
+  set_constraint        → bulk_set_constraints
+  set_deadline          → bulk_set_deadlines
+  set_task_active       → bulk_set_task_active
+  update_custom_fields  → bulk_update_custom_fields
+  assign_resource       → bulk_assign_resources
+
+After any bulk manual-schedule change, call calculate_project to refresh dates.
+Use dry_run_bulk_update to preview bulk_update_tasks changes before applying them.
+
+ENVIRONMENT:
+  MSPROJECT_SAFE_ROOT  — directory all file tools are confined to (required for file ops).
+  MSPROJECT_DRY_RUN=1  — run in read/preview-only mode; mutations are logged but not applied.
+
+Call get_tool_guide() for the full tool category map and efficiency rules.
+""".strip()
+
+mcp = FastMCP("MS Project", instructions=SERVER_INSTRUCTIONS)
 
 # ---------------------------------------------------------------------------
 # Safety / hardening layer
@@ -268,11 +298,16 @@ def _custom_field_id(field_name):
 # TOOLS — Project management
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Open Project", annotations=ToolAnnotations(readOnlyHint=False))
 def open_project(file_path: str) -> str:
     """
-    Open a Microsoft Project file (.mpp or .xml).
+    Open a Microsoft Project file. Handles both native .mpp and MS Project .xml
+    (use this to import an XML roadmap exported from another tool — no separate import step).
     MS Project must already be running (it is launched automatically if not).
+
+    Args:
+        file_path: Path to the .mpp or .xml file (confined to MSPROJECT_SAFE_ROOT).
+    Returns: JSON with status, project name, full path, task count, and start/finish dates.
     """
     app       = _launch_app()
     safe_path = _resolve_safe_path(file_path, must_exist=True)
@@ -288,7 +323,7 @@ def open_project(file_path: str) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="New Project", annotations=ToolAnnotations(readOnlyHint=False))
 def new_project(title: str = "New Project", start: str = "") -> str:
     """
     Create a new blank project without needing a file on disk.
@@ -312,7 +347,7 @@ def new_project(title: str = "New Project", start: str = "") -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Get Project Info", annotations=ToolAnnotations(readOnlyHint=True))
 def get_project_info() -> str:
     """Get summary information about the currently active project."""
     app  = get_app()
@@ -358,7 +393,7 @@ def get_project_info() -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Set Project Properties", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def set_project_properties(properties_json: str) -> str:
     """
     Set project metadata properties.
@@ -367,7 +402,7 @@ def set_project_properties(properties_json: str) -> str:
         properties_json: JSON string with fields to set. All optional:
             title, manager, company, author, subject, status_date (YYYY-MM-DD),
             start (YYYY-MM-DD).
-            Example: '{"title": "EXPO 2030", "manager": "John", "company": "ERC"}'
+            Example: '{"title": "My Project", "manager": "John", "company": "Acme"}'
     """
     props = json.loads(properties_json)
     app   = get_app()
@@ -393,7 +428,7 @@ def set_project_properties(properties_json: str) -> str:
     return json.dumps({"status": "updated", "changed": changed}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Save Project", annotations=ToolAnnotations(readOnlyHint=False))
 def save_project() -> str:
     """Save the active project (in place)."""
     app = get_app()
@@ -402,11 +437,16 @@ def save_project() -> str:
     return "[dry-run] Save skipped; project left unsaved."
 
 
-@mcp.tool()
+@mcp.tool(title="Save Project As", annotations=ToolAnnotations(readOnlyHint=False))
 def save_project_as(file_path: str, format: str = "mpp") -> str:
     """
-    Save the active project to a new path.
-    format: 'mpp' (default), 'xml', 'csv'
+    Save the active project to a new path. Pass format='xml' to export MS Project XML,
+    or format='csv' for CSV — no separate export tool is needed.
+
+    Args:
+        file_path: Destination path (confined to MSPROJECT_SAFE_ROOT).
+        format:    'mpp' (default), 'xml', or 'csv'.
+    Returns: A confirmation string with the saved path.
     """
     fmt_map   = {"mpp": 0, "xml": 22, "csv": 23}
     fmt_id    = fmt_map.get(format.lower(), 0)
@@ -418,9 +458,15 @@ def save_project_as(file_path: str, format: str = "mpp") -> str:
     return f"Project saved as: {safe_path}"
 
 
-@mcp.tool()
+@mcp.tool(title="Close Project", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 def close_project(save: bool = False) -> str:
-    """Close the active project. Set save=True to save before closing."""
+    """
+    Close the active project. Irreversible for unsaved changes.
+
+    Args:
+        save: If True, save before closing; if False (default), discard unsaved changes.
+    Returns: A confirmation string.
+    """
     app = get_app()
     if save and DRY_RUN:
         app.FileClose(Save=0)
@@ -433,19 +479,21 @@ def close_project(save: bool = False) -> str:
 # TOOLS — Reading tasks
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Get Tasks", annotations=ToolAnnotations(readOnlyHint=True))
 def get_tasks(
     include_summary: bool = False,
     outline_level: int = 0,
     keyword: str = ""
 ) -> str:
     """
-    Get all tasks from the active project.
+    Get all tasks from the active project. To search tasks by name, pass the keyword
+    argument (case-insensitive substring match) — no separate search tool is needed.
 
     Args:
         include_summary: Include summary/parent tasks (default False).
         outline_level:   Filter to a specific outline level (0 = all).
         keyword:         Filter tasks whose name contains this string (case-insensitive).
+    Returns: JSON with count and a tasks array (each task includes its UniqueID).
     """
     app  = get_app()
     proj = get_proj(app)
@@ -465,9 +513,15 @@ def get_tasks(
     return json.dumps({"count": len(results), "tasks": results}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Get Task", annotations=ToolAnnotations(readOnlyHint=True))
 def get_task(unique_id: int) -> str:
-    """Get full details for a single task by its UniqueID."""
+    """
+    Get full details for a single task by its UniqueID.
+
+    Args:
+        unique_id: Task UniqueID.
+    Returns: JSON with the task's full field set, or an error if not found.
+    """
     app  = get_app()
     proj = get_proj(app)
 
@@ -478,7 +532,7 @@ def get_task(unique_id: int) -> str:
     return json.dumps({"error": f"Task UniqueID {unique_id} not found."})
 
 
-@mcp.tool()
+@mcp.tool(title="Get Critical Path", annotations=ToolAnnotations(readOnlyHint=True))
 def get_critical_path() -> str:
     """Return all tasks on the critical path (non-summary)."""
     app  = get_app()
@@ -492,11 +546,14 @@ def get_critical_path() -> str:
     return json.dumps({"count": len(results), "tasks": results}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Get Tasks By RAG", annotations=ToolAnnotations(readOnlyHint=True))
 def get_tasks_by_rag(rag: str = "Red") -> str:
     """
     Return tasks filtered by RAG status stored in the Text1 custom field.
-    rag: 'Red', 'Amber', or 'Green'
+
+    Args:
+        rag: 'Red', 'Amber', or 'Green' (default 'Red'); case-insensitive.
+    Returns: JSON with the rag queried, a count, and the matching tasks.
     """
     app  = get_app()
     proj = get_proj(app)
@@ -510,7 +567,7 @@ def get_tasks_by_rag(rag: str = "Red") -> str:
     return json.dumps({"rag": rag, "count": len(results), "tasks": results}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Get Overdue Tasks", annotations=ToolAnnotations(readOnlyHint=True))
 def get_overdue_tasks() -> str:
     """Return incomplete tasks whose Finish date is in the past."""
     import datetime
@@ -534,9 +591,15 @@ def get_overdue_tasks() -> str:
     return json.dumps({"count": len(results), "tasks": results}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Get Tasks By Resource", annotations=ToolAnnotations(readOnlyHint=True))
 def get_tasks_by_resource(resource_name: str) -> str:
-    """Return all tasks assigned to a named resource (case-insensitive substring match)."""
+    """
+    Return all tasks assigned to a named resource.
+
+    Args:
+        resource_name: Resource name to match (case-insensitive substring).
+    Returns: JSON with a count and the matching tasks.
+    """
     app  = get_app()
     proj = get_proj(app)
 
@@ -558,7 +621,7 @@ def get_tasks_by_resource(resource_name: str) -> str:
 # TOOLS — Modifying tasks
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Update Task", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def update_task(
     unique_id:        int,
     name:             str = "",
@@ -649,10 +712,11 @@ def update_task(
     return json.dumps({"error": f"Task UniqueID {unique_id} not found."})
 
 
-@mcp.tool()
+@mcp.tool(title="Bulk Update RAG", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def bulk_update_rag(updates: str) -> str:
     """
-    Update RAG status for multiple tasks at once.
+    Update RAG status (Text1) for multiple tasks at once. Use this for RAG-only changes
+    instead of looping update_task — whenever you have 2+ tasks, use this.
 
     Args:
         updates: JSON string — list of {unique_id, rag} objects.
@@ -679,10 +743,11 @@ def bulk_update_rag(updates: str) -> str:
                        "results": results}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Bulk Update Tasks", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def bulk_update_tasks(updates_json: str) -> str:
     """
     Update multiple tasks in one call. Suspends auto-calc for performance.
+    Prefer this over calling update_task in a loop — whenever you have 2+ tasks, use this.
 
     Args:
         updates_json: JSON string — list of objects with fields:
@@ -741,7 +806,7 @@ def bulk_update_tasks(updates_json: str) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Add Task", annotations=ToolAnnotations(readOnlyHint=False))
 def add_task(
     name:          str,
     outline_level: int  = 1,
@@ -809,10 +874,11 @@ def add_task(
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Bulk Add Tasks", annotations=ToolAnnotations(readOnlyHint=False))
 def bulk_add_tasks(tasks_json: str) -> str:
     """
     Add multiple tasks in one call. Critical for roadmap generation.
+    Prefer this over calling add_task in a loop — whenever you have 2+ tasks, use this.
     Suspends auto-calc for performance. Tasks are added sequentially;
     outline_level controls WBS hierarchy.
 
@@ -877,9 +943,16 @@ def bulk_add_tasks(tasks_json: str) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Delete Task", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 def delete_task(unique_id: int) -> str:
-    """Delete a task by its UniqueID. This cannot be undone after save."""
+    """
+    Delete a task by its UniqueID. Destructive — cannot be undone after save
+    (honours MSPROJECT_DRY_RUN, which previews instead of deleting).
+
+    Args:
+        unique_id: Task UniqueID to delete.
+    Returns: JSON with the deletion status (or a dry-run preview).
+    """
     app  = get_app()
     proj = get_proj(app)
 
@@ -909,7 +982,7 @@ def delete_task(unique_id: int) -> str:
 # TOOLS — Task scheduling control
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Set Task Mode", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def set_task_mode(unique_id: int, manual: bool = True) -> str:
     """
     Set one task to manually or automatically scheduled.
@@ -936,10 +1009,11 @@ def set_task_mode(unique_id: int, manual: bool = True) -> str:
     return json.dumps({"error": f"Task UniqueID {unique_id} not found."})
 
 
-@mcp.tool()
+@mcp.tool(title="Bulk Set Task Mode", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def bulk_set_task_mode(updates_json: str) -> str:
     """
     Set manual/auto schedule mode for multiple tasks, or by scope.
+    Prefer this over calling set_task_mode in a loop — whenever you have 2+ tasks, use this.
 
     Args:
         updates_json: JSON string — EITHER:
@@ -984,7 +1058,7 @@ def bulk_set_task_mode(updates_json: str) -> str:
     return json.dumps({"updated": updated}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Set Constraint", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def set_constraint(unique_id: int, constraint_type: str = "SNET", constraint_date: str = "") -> str:
     """
     Set a scheduling constraint on a single task.
@@ -1024,10 +1098,11 @@ def set_constraint(unique_id: int, constraint_type: str = "SNET", constraint_dat
     return json.dumps({"error": f"Task UniqueID {unique_id} not found."})
 
 
-@mcp.tool()
+@mcp.tool(title="Bulk Set Constraints", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def bulk_set_constraints(constraints_json: str) -> str:
     """
     Set scheduling constraints on multiple tasks in one call.
+    Prefer this over calling set_constraint in a loop — whenever you have 2+ tasks, use this.
 
     Args:
         constraints_json: JSON string — list of {unique_id, constraint_type, constraint_date (optional)}.
@@ -1079,7 +1154,7 @@ def bulk_set_constraints(constraints_json: str) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Clear Estimated Flags", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 def clear_estimated_flags() -> str:
     """
     Remove the estimated '?' flag from all task dates in the active project.
@@ -1101,7 +1176,7 @@ def clear_estimated_flags() -> str:
     return json.dumps({"status": "cleared", "tasks_updated": count}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Rename Custom Fields", annotations=ToolAnnotations(readOnlyHint=False))
 def rename_custom_fields(fields_json: str) -> str:
     """
     Rename custom text fields (Text1-Text30) to meaningful labels.
@@ -1142,7 +1217,7 @@ def rename_custom_fields(fields_json: str) -> str:
 # TOOLS — Dependencies
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Add Predecessor", annotations=ToolAnnotations(readOnlyHint=False))
 def add_predecessor(
     successor_unique_id:   int,
     predecessor_unique_id: int,
@@ -1200,10 +1275,11 @@ def add_predecessor(
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Bulk Add Predecessors", annotations=ToolAnnotations(readOnlyHint=False))
 def bulk_add_predecessors(links_json: str) -> str:
     """
     Add multiple predecessor links in one call.
+    Prefer this over calling add_predecessor in a loop — whenever you have 2+ links, use this.
 
     Args:
         links_json: JSON string — list of link objects:
@@ -1259,7 +1335,7 @@ def bulk_add_predecessors(links_json: str) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Remove Predecessor", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 def remove_predecessor(
     successor_unique_id:   int,
     predecessor_unique_id: int,
@@ -1267,6 +1343,11 @@ def remove_predecessor(
     """
     Remove a specific predecessor link from a single task.
     For 2+ links use bulk_remove_predecessors — one save round-trip for all removals.
+
+    Args:
+        successor_unique_id:   UniqueID of the task that has the predecessor.
+        predecessor_unique_id: UniqueID of the predecessor link to remove.
+    Returns: JSON with the removal status.
     """
     app  = get_app()
     proj = get_proj(app)
@@ -1300,10 +1381,11 @@ def remove_predecessor(
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Bulk Remove Predecessors", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 def bulk_remove_predecessors(links_json: str) -> str:
     """
     Remove multiple predecessor links in one call.
+    Prefer this over calling remove_predecessor in a loop — whenever you have 2+ links, use this.
 
     Args:
         links_json: JSON string — list of {successor_unique_id, predecessor_unique_id}.
@@ -1354,9 +1436,15 @@ def bulk_remove_predecessors(links_json: str) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Get Task Dependencies", annotations=ToolAnnotations(readOnlyHint=True))
 def get_task_dependencies(unique_id: int) -> str:
-    """Get all predecessor and successor dependencies for a task."""
+    """
+    Get all predecessor and successor dependencies for a task.
+
+    Args:
+        unique_id: Task UniqueID.
+    Returns: JSON listing the task's predecessor and successor links.
+    """
     app  = get_app()
     proj = get_proj(app)
     mpd  = _get_mpd(proj)
@@ -1407,7 +1495,7 @@ def get_task_dependencies(unique_id: int) -> str:
 # TOOLS — Resources
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Get Resources", annotations=ToolAnnotations(readOnlyHint=True))
 def get_resources() -> str:
     """Get all resources in the active project."""
     app  = get_app()
@@ -1430,7 +1518,7 @@ def get_resources() -> str:
     return json.dumps({"count": len(results), "resources": results}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Add Resource", annotations=ToolAnnotations(readOnlyHint=False))
 def add_resource(
     name:          str,
     type:          int   = 0,
@@ -1471,11 +1559,12 @@ def add_resource(
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Assign Resource", annotations=ToolAnnotations(readOnlyHint=False))
 def assign_resource(task_unique_id: int, resource_name: str, units: float = 1.0) -> str:
     """
     Assign a resource to a task. If the resource doesn't exist, it is created.
     If the task already has resources, the new one is appended.
+    For multiple assignments use bulk_assign_resources — one save round-trip for all.
 
     Args:
         task_unique_id: Task UniqueID (required).
@@ -1524,38 +1613,12 @@ def assign_resource(task_unique_id: int, resource_name: str, units: float = 1.0)
 
 
 # ---------------------------------------------------------------------------
-# TOOLS — Import / Export
-# ---------------------------------------------------------------------------
-
-@mcp.tool()
-def import_xml(file_path: str) -> str:
-    """
-    Open an MS Project XML file (e.g. the consolidated EXPO 2030 roadmap).
-    MS Project must be running.
-    """
-    return open_project(file_path)
-
-
-@mcp.tool()
-def export_xml(output_path: str) -> str:
-    """Export the active project to MS Project XML format."""
-    return save_project_as(output_path, format="xml")
-
-
-# ---------------------------------------------------------------------------
 # TOOLS — Utilities
 # ---------------------------------------------------------------------------
+# Note: XML import/export and task search are folded into their parent tools —
+# open_project (.xml), save_project_as(format='xml'), and get_tasks(keyword=...).
 
-@mcp.tool()
-def search_tasks(query: str, include_summary: bool = False) -> str:
-    """
-    Search for tasks by name (case-insensitive substring match).
-    Returns matching tasks with their UniqueIDs for use in other tools.
-    """
-    return get_tasks(include_summary=include_summary, keyword=query)
-
-
-@mcp.tool()
+@mcp.tool(title="Get Progress Summary", annotations=ToolAnnotations(readOnlyHint=True))
 def get_progress_summary() -> str:
     """
     Return a high-level progress summary:
@@ -1621,7 +1684,7 @@ def get_progress_summary() -> str:
 # TOOLS — WBS & Hierarchy
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Indent Task", annotations=ToolAnnotations(readOnlyHint=False))
 def indent_task(unique_id: int, direction: str = "indent") -> str:
     """
     Promote or demote a task in the WBS hierarchy.
@@ -1653,7 +1716,7 @@ def indent_task(unique_id: int, direction: str = "indent") -> str:
     return json.dumps({"error": f"Task UniqueID {unique_id} not found."})
 
 
-@mcp.tool()
+@mcp.tool(title="Get WBS Structure", annotations=ToolAnnotations(readOnlyHint=True))
 def get_wbs_structure(max_level: int = 0) -> str:
     """
     Export the full WBS hierarchy as a nested JSON tree.
@@ -1713,7 +1776,7 @@ def get_wbs_structure(max_level: int = 0) -> str:
 # TOOLS — Calendars
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Get Calendars", annotations=ToolAnnotations(readOnlyHint=True))
 def get_calendars() -> str:
     """List all base calendars in the project and which one is active."""
     app  = get_app()
@@ -1743,7 +1806,7 @@ def get_calendars() -> str:
 # TOOLS — Schedule Analysis
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Get Schedule Analysis", annotations=ToolAnnotations(readOnlyHint=True))
 def get_schedule_analysis() -> str:
     """
     Return float/slack metrics and schedule health for all non-summary tasks.
@@ -1810,7 +1873,7 @@ def get_schedule_analysis() -> str:
 # TOOLS — Baselines
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Save Baseline", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def save_baseline(baseline_number: int = 0, all_tasks: bool = True) -> str:
     """
     Save a baseline snapshot for earned value and variance tracking.
@@ -1838,7 +1901,7 @@ def save_baseline(baseline_number: int = 0, all_tasks: bool = True) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Clear Baseline", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 def clear_baseline(baseline_number: int = 0, all_tasks: bool = True) -> str:
     """
     Clear a previously saved baseline.
@@ -1870,7 +1933,7 @@ def clear_baseline(baseline_number: int = 0, all_tasks: bool = True) -> str:
 # TOOLS — Earned Value
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Get Earned Value", annotations=ToolAnnotations(readOnlyHint=True))
 def get_earned_value() -> str:
     """
     Return earned value metrics for all non-summary tasks.
@@ -1955,7 +2018,7 @@ def get_earned_value() -> str:
 # TOOLS — Phase 3: Multi-Project Navigation
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="List Projects", annotations=ToolAnnotations(readOnlyHint=True))
 def list_projects() -> str:
     """
     List all open projects in MS Project with metadata.
@@ -1989,7 +2052,7 @@ def list_projects() -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Switch Project", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def switch_project(name_or_index: str) -> str:
     """
     Switch the active project by name (substring match) or 1-based index.
@@ -2066,7 +2129,7 @@ def switch_project(name_or_index: str) -> str:
 # TOOLS — Phase 3: Advanced Filtering & Queries
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Filter Tasks", annotations=ToolAnnotations(readOnlyHint=True))
 def filter_tasks(filters_json: str) -> str:
     """
     Powerful AND-logic filtering across all task fields with sort and pagination.
@@ -2178,7 +2241,7 @@ def filter_tasks(filters_json: str) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Group Tasks By", annotations=ToolAnnotations(readOnlyHint=True))
 def group_tasks_by(field: str, include_tasks: bool = False) -> str:
     """
     Group non-summary tasks by a field and return counts per group.
@@ -2263,7 +2326,7 @@ def group_tasks_by(field: str, include_tasks: bool = False) -> str:
 # TOOLS — Phase 3: Calendar Management (Write)
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Set Calendar Exception", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def set_calendar_exception(
     calendar_name: str,
     name: str,
@@ -2322,7 +2385,7 @@ def set_calendar_exception(
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Set Project Calendar", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def set_project_calendar(calendar_name: str) -> str:
     """
     Switch the active project's base calendar.
@@ -2405,7 +2468,7 @@ def set_project_calendar(calendar_name: str) -> str:
 # TOOLS — Phase 3: Extended Custom Fields
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Update Custom Fields", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def update_custom_fields(unique_id: int, fields_json: str) -> str:
     """
     Write any custom field on a single task: Text1-30, Number1-20, Date1-10, Flag1-20, Duration1-10.
@@ -2462,10 +2525,11 @@ def update_custom_fields(unique_id: int, fields_json: str) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Bulk Update Custom Fields", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def bulk_update_custom_fields(updates_json: str) -> str:
     """
     Write custom fields on multiple tasks in one call.
+    Prefer this over calling update_custom_fields in a loop — whenever you have 2+ tasks, use this.
 
     Args:
         updates_json: JSON string — list of {unique_id, fields} objects where fields
@@ -2530,7 +2594,7 @@ def bulk_update_custom_fields(updates_json: str) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Get Custom Field Values", annotations=ToolAnnotations(readOnlyHint=True))
 def get_custom_field_values(field_name: str) -> str:
     """
     Get all unique values for a custom field across all tasks.
@@ -2582,7 +2646,7 @@ def get_custom_field_values(field_name: str) -> str:
 # TOOLS — Phase 3: Schedule & Dependency Intelligence
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Validate Schedule", annotations=ToolAnnotations(readOnlyHint=True))
 def validate_schedule() -> str:
     """
     Comprehensive schedule health check — the PMO's best friend.
@@ -2702,7 +2766,7 @@ def validate_schedule() -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Get Milestone Report", annotations=ToolAnnotations(readOnlyHint=True))
 def get_milestone_report(days_ahead: int = 30, upcoming_count: int = 10) -> str:
     """
     Milestone-focused status report for executive dashboards.
@@ -2783,7 +2847,7 @@ def get_milestone_report(days_ahead: int = 30, upcoming_count: int = 10) -> str:
 # TOOLS — Phase 3: Resource Intelligence
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Get Resource Workload", annotations=ToolAnnotations(readOnlyHint=True))
 def get_resource_workload(resource_name: str, start_date: str = "", end_date: str = "") -> str:
     """
     Resource allocation view with conflict detection.
@@ -2884,7 +2948,7 @@ def get_resource_workload(resource_name: str, start_date: str = "", end_date: st
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Level Resources", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 def level_resources() -> str:
     """
     Run MS Project's built-in resource leveling algorithm.
@@ -2906,7 +2970,7 @@ def level_resources() -> str:
 # TOOLS — Phase 3: Deadline & Active Task Management
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Set Deadline", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def set_deadline(unique_id: int, deadline_date: str) -> str:
     """
     Set a soft deadline on a single task (visual indicator only, does not affect scheduling).
@@ -2954,7 +3018,7 @@ def set_deadline(unique_id: int, deadline_date: str) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Set Task Active", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def set_task_active(unique_id: int, active: bool = True) -> str:
     """
     Activate or deactivate a single task. Deactivated tasks are excluded from scheduling
@@ -2982,10 +3046,11 @@ def set_task_active(unique_id: int, active: bool = True) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Bulk Set Task Active", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def bulk_set_task_active(updates_json: str) -> str:
     """
     Activate or deactivate multiple tasks in one call. Also accepts a scope shortcut.
+    Prefer this over calling set_task_active in a loop — whenever you have 2+ tasks, use this.
 
     Args:
         updates_json: JSON string — EITHER a list of {unique_id, active (bool)} objects:
@@ -3033,7 +3098,7 @@ def bulk_set_task_active(updates_json: str) -> str:
 # TOOLS — Phase 3: Safe Bulk Operations
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Dry Run Bulk Update", annotations=ToolAnnotations(readOnlyHint=True))
 def dry_run_bulk_update(updates_json: str) -> str:
     """
     Preview bulk changes without modifying anything — the enterprise safety net.
@@ -3125,7 +3190,7 @@ def dry_run_bulk_update(updates_json: str) -> str:
 # TOOLS — Phase 4, Tier 1: High Impact
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Compare Baselines", annotations=ToolAnnotations(readOnlyHint=True))
 def compare_baselines(baseline_a: int = 0, baseline_b: int = -1) -> str:
     """
     Variance report between two baselines, or baseline vs current schedule.
@@ -3219,7 +3284,7 @@ def compare_baselines(baseline_a: int = 0, baseline_b: int = -1) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Get Dependency Chain", annotations=ToolAnnotations(readOnlyHint=True))
 def get_dependency_chain(unique_id: int, direction: str = "successors", max_depth: int = 50) -> str:
     """
     Recursive walk of the dependency chain — 'what's downstream if this slips?'
@@ -3287,10 +3352,11 @@ def get_dependency_chain(unique_id: int, direction: str = "successors", max_dept
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Bulk Assign Resources", annotations=ToolAnnotations(readOnlyHint=False))
 def bulk_assign_resources(assignments_json: str) -> str:
     """
     Assign resources to multiple tasks in one call.
+    Prefer this over calling assign_resource in a loop — whenever you have 2+ assignments, use this.
 
     Args:
         assignments_json: JSON string — list of {task_unique_id, resource_name, units (optional)}.
@@ -3350,7 +3416,7 @@ def bulk_assign_resources(assignments_json: str) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Remove Resource Assignment", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 def remove_resource_assignment(task_unique_id: int, resource_name: str) -> str:
     """
     Remove a specific resource from a task.
@@ -3386,7 +3452,7 @@ def remove_resource_assignment(task_unique_id: int, resource_name: str) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Update Resource", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def update_resource(resource_name: str, new_name: str = "", max_units: float = -1, standard_rate: str = "", cost_per_use: float = -1) -> str:
     """
     Modify an existing resource's properties.
@@ -3433,7 +3499,7 @@ def update_resource(resource_name: str, new_name: str = "", max_units: float = -
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Move Task", annotations=ToolAnnotations(readOnlyHint=False))
 def move_task(unique_id: int, after_unique_id: int) -> str:
     """
     Reposition a task to appear after another task.
@@ -3487,7 +3553,7 @@ def move_task(unique_id: int, after_unique_id: int) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Get Progress By WBS", annotations=ToolAnnotations(readOnlyHint=True))
 def get_progress_by_wbs(max_level: int = 2) -> str:
     """
     Rolled-up % complete per WBS branch — the PMO dashboard.
@@ -3545,7 +3611,7 @@ def get_progress_by_wbs(max_level: int = 2) -> str:
 # TOOLS — Phase 4, Tier 2: Nice to Have
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Copy Task Structure", annotations=ToolAnnotations(readOnlyHint=False))
 def copy_task_structure(source_unique_id: int, copies: int = 1) -> str:
     """
     Duplicate a task subtree (reusable programme templates).
@@ -3603,7 +3669,7 @@ def copy_task_structure(source_unique_id: int, copies: int = 1) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Cross Project Link", annotations=ToolAnnotations(readOnlyHint=False))
 def cross_project_link(source_project: str, source_unique_id: int, target_project: str, target_unique_id: int, link_type: str = "FS") -> str:
     """
     Create a dependency link across open projects.
@@ -3661,7 +3727,7 @@ def cross_project_link(source_project: str, source_unique_id: int, target_projec
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Export CSV", annotations=ToolAnnotations(readOnlyHint=False))
 def export_csv(output_path: str, columns_json: str = "", filters_json: str = "") -> str:
     """
     Export filtered task data to CSV for PowerBI / Excel dashboards.
@@ -3722,10 +3788,11 @@ def export_csv(output_path: str, columns_json: str = "", filters_json: str = "")
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Bulk Set Deadlines", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def bulk_set_deadlines(deadlines_json: str) -> str:
     """
     Set deadlines on multiple tasks at once.
+    Prefer this over calling set_deadline in a loop — whenever you have 2+ tasks, use this.
 
     Args:
         deadlines_json: JSON string — list of {unique_id, deadline_date}.
@@ -3769,7 +3836,7 @@ def bulk_set_deadlines(deadlines_json: str) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Find Available Slack", annotations=ToolAnnotations(readOnlyHint=True))
 def find_available_slack(min_days: int = 5) -> str:
     """
     Find tasks with positive float — where can we absorb delay?
@@ -3821,7 +3888,7 @@ def find_available_slack(min_days: int = 5) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Set Task Calendar", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def set_task_calendar(unique_id: int, calendar_name: str) -> str:
     """
     Set a task-level calendar override (e.g. 24/7 for commissioning phase).
@@ -3872,7 +3939,7 @@ def set_task_calendar(unique_id: int, calendar_name: str) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Get Cost Summary", annotations=ToolAnnotations(readOnlyHint=True))
 def get_cost_summary() -> str:
     """
     Budget rollup with cost fields.
@@ -3956,7 +4023,7 @@ def get_cost_summary() -> str:
 # TOOLS — Phase 4, Tier 3: Power User
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Undo Last", annotations=ToolAnnotations(readOnlyHint=False))
 def undo_last(count: int = 1) -> str:
     """
     Safety net — undo last N operations in MS Project.
@@ -3979,7 +4046,7 @@ def undo_last(count: int = 1) -> str:
     return json.dumps({"status": "undone", "undo_count": count}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Create Calendar", annotations=ToolAnnotations(readOnlyHint=False))
 def create_calendar(name: str, copy_from: str = "Standard") -> str:
     """
     Create a new base calendar, optionally copying from an existing one.
@@ -4031,7 +4098,7 @@ def create_calendar(name: str, copy_from: str = "Standard") -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Insert Subproject", annotations=ToolAnnotations(readOnlyHint=False))
 def insert_subproject(file_path: str, after_unique_id: int = 0) -> str:
     """
     Insert an external .mpp file as a subproject.
@@ -4082,7 +4149,7 @@ def insert_subproject(file_path: str, after_unique_id: int = 0) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Apply Filter", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def apply_filter(filter_name: str) -> str:
     """
     Apply MS Project's built-in or custom named filter to the Gantt view.
@@ -4104,7 +4171,7 @@ def apply_filter(filter_name: str) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Snapshot To JSON", annotations=ToolAnnotations(readOnlyHint=False))
 def snapshot_to_json(output_path: str, include_resources: bool = True) -> str:
     """
     Full project state dump for version control / diff.
@@ -4183,7 +4250,7 @@ def snapshot_to_json(output_path: str, include_resources: bool = True) -> str:
 # Phase 5 — get_constraints, delete_resource, get_actual_work
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Get Constraints", annotations=ToolAnnotations(readOnlyHint=True))
 def get_constraints() -> str:
     """Return all tasks with non-default (non-ASAP) scheduling constraints."""
     CONSTRAINT_NAMES = {
@@ -4212,11 +4279,15 @@ def get_constraints() -> str:
     return json.dumps({"count": len(results), "tasks": results}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Delete Resource", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 def delete_resource(resource_name: str) -> str:
     """
-    Delete a resource from the project pool (case-insensitive match).
-    All task assignments referencing this resource are cleared first.
+    Delete a resource from the project pool (case-insensitive match). Destructive —
+    all task assignments referencing this resource are cleared first.
+
+    Args:
+        resource_name: Resource name to delete (case-insensitive).
+    Returns: JSON with the deletion status (or a dry-run preview).
     """
     app  = get_app()
     proj = get_proj(app)
@@ -4261,7 +4332,7 @@ def delete_resource(resource_name: str) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Get Actual Work", annotations=ToolAnnotations(readOnlyHint=True))
 def get_actual_work() -> str:
     """
     Return actual vs remaining work per task and project totals.
@@ -4315,7 +4386,7 @@ def get_actual_work() -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(title="Calculate Project", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def calculate_project() -> str:
     """
     Recalculate the active project schedule.
@@ -4326,7 +4397,7 @@ def calculate_project() -> str:
     return json.dumps({"status": "calculated", "project": app.ActiveProject.Name})
 
 
-@mcp.tool()
+@mcp.tool(title="List Calendar Exceptions", annotations=ToolAnnotations(readOnlyHint=True))
 def list_calendar_exceptions(calendar_name: str = "") -> str:
     """
     List all exceptions (holidays, non-working days) defined on a calendar.
@@ -4371,7 +4442,7 @@ def list_calendar_exceptions(calendar_name: str = "") -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Health Check", annotations=ToolAnnotations(readOnlyHint=True))
 def health_check() -> str:
     """
     Lightweight connectivity test. Returns MS Project version, whether a project
@@ -4399,7 +4470,7 @@ def health_check() -> str:
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Get Tool Guide", annotations=ToolAnnotations(readOnlyHint=True))
 def get_tool_guide() -> str:
     """
     Routing guide: which tool to call for common PM operations, and when to use bulk tools.
@@ -4432,7 +4503,7 @@ def get_tool_guide() -> str:
                                 "close_project", "get_project_info", "set_project_properties",
                                 "list_projects", "switch_project"],
             "read_tasks":      ["get_tasks", "get_task", "get_critical_path", "get_tasks_by_rag",
-                                "get_overdue_tasks", "get_tasks_by_resource", "search_tasks",
+                                "get_overdue_tasks", "get_tasks_by_resource",
                                 "filter_tasks", "group_tasks_by", "get_wbs_structure",
                                 "get_progress_summary"],
             "write_tasks":     ["add_task", "bulk_add_tasks", "add_recurring_task",
@@ -4466,7 +4537,8 @@ def get_tool_guide() -> str:
                                 "get_earned_value", "get_variance_report"],
             "reporting":       ["get_progress_by_wbs", "get_cost_summary", "get_actual_work",
                                 "get_timephased_data", "snapshot_to_json", "snapshot_diff"],
-            "import_export":   ["import_xml", "export_xml", "export_csv", "insert_subproject"],
+            "import_export":   ["open_project (.xml import)", "save_project_as (xml/csv export)",
+                                "export_csv", "insert_subproject"],
             "custom_fields":   ["update_custom_fields", "bulk_update_custom_fields",
                                 "get_custom_field_values", "rename_custom_fields"],
             "safety":          ["dry_run_bulk_update", "undo_last", "health_check", "get_tool_guide"],
@@ -4474,7 +4546,7 @@ def get_tool_guide() -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Update Project", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 def update_project(complete_through: str, set_0_or_100: bool = False) -> str:
     """
     Mark all tasks complete through a given date (the weekly PMO ritual).
@@ -4513,7 +4585,7 @@ def update_project(complete_through: str, set_0_or_100: bool = False) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Reschedule Incomplete Work", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 def reschedule_incomplete_work(reschedule_from: str = "") -> str:
     """
     Move remaining work on incomplete tasks to start after the given date
@@ -4552,7 +4624,7 @@ def reschedule_incomplete_work(reschedule_from: str = "") -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Delete Calendar", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 def delete_calendar(calendar_name: str) -> str:
     """
     Delete a base calendar by name. Cannot delete the project calendar.
@@ -4581,7 +4653,7 @@ def delete_calendar(calendar_name: str) -> str:
     return json.dumps({"error": f"Calendar '{calendar_name}' not found."})
 
 
-@mcp.tool()
+@mcp.tool(title="Delete Calendar Exception", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 def delete_calendar_exception(calendar_name: str, exception_name: str) -> str:
     """
     Remove a specific exception (holiday/non-working day) from a calendar.
@@ -4623,7 +4695,7 @@ def delete_calendar_exception(calendar_name: str, exception_name: str) -> str:
     return json.dumps({"error": f"Exception '{exception_name}' not found in calendar '{calendar_name}'."})
 
 
-@mcp.tool()
+@mcp.tool(title="Set Resource Calendar", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def set_resource_calendar(resource_name: str, calendar_name: str) -> str:
     """
     Assign a specific base calendar to a resource (e.g., part-time, different timezone).
@@ -4657,7 +4729,7 @@ def set_resource_calendar(resource_name: str, calendar_name: str) -> str:
     return json.dumps({"error": f"Resource '{resource_name}' not found."})
 
 
-@mcp.tool()
+@mcp.tool(title="Get Timephased Data", annotations=ToolAnnotations(readOnlyHint=True))
 def get_timephased_data(
     unique_id:  int,
     start_date: str,
@@ -4726,7 +4798,7 @@ def get_timephased_data(
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Set Working Hours", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def set_working_hours(calendar_name: str, day: int, shifts_json: str) -> str:
     """
     Modify working hours for a specific day of the week in a calendar.
@@ -4800,7 +4872,7 @@ def set_working_hours(calendar_name: str, day: int, shifts_json: str) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Get Resource Availability", annotations=ToolAnnotations(readOnlyHint=True))
 def get_resource_availability(
     resource_name: str,
     start_date:    str,
@@ -4865,7 +4937,7 @@ def get_resource_availability(
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Get Variance Report", annotations=ToolAnnotations(readOnlyHint=True))
 def get_variance_report(baseline: int = 0) -> str:
     """
     Schedule and cost variance per task compared to a baseline.
@@ -4922,7 +4994,7 @@ def get_variance_report(baseline: int = 0) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Snapshot Diff", annotations=ToolAnnotations(readOnlyHint=True))
 def snapshot_diff(path_a: str, path_b: str) -> str:
     """
     Compare two JSON snapshot files (from snapshot_to_json) and return
@@ -4973,7 +5045,7 @@ def snapshot_diff(path_a: str, path_b: str) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Set Task Hyperlink", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def set_task_hyperlink(unique_id: int, url: str, text: str = "", sub_address: str = "") -> str:
     """
     Set a hyperlink on a task.
@@ -5007,7 +5079,7 @@ def set_task_hyperlink(unique_id: int, url: str, text: str = "", sub_address: st
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Add Recurring Task", annotations=ToolAnnotations(readOnlyHint=False))
 def add_recurring_task(
     name:            str,
     recurrence_type: str = "weekly",
@@ -5097,7 +5169,7 @@ def add_recurring_task(
         return json.dumps({"error": f"Failed to create recurring task: {e}"})
 
 
-@mcp.tool()
+@mcp.tool(title="Get Resource Rate Tables", annotations=ToolAnnotations(readOnlyHint=True))
 def get_resource_rate_tables(resource_name: str) -> str:
     """
     Get cost rate tables (A through E) for a resource.
@@ -5140,7 +5212,7 @@ def get_resource_rate_tables(resource_name: str) -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Set Resource Rate Table", annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
 def set_resource_rate_table(
     resource_name: str,
     table:         str = "A",
@@ -5218,7 +5290,7 @@ def set_resource_rate_table(
 # TOOLS — Phase 7: Critical Path Intelligence
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Get Critical Path Sequence", annotations=ToolAnnotations(readOnlyHint=True))
 def get_critical_path_sequence() -> str:
     """
     Return the critical path as an ordered chain from project start to finish.
@@ -5346,7 +5418,7 @@ def get_critical_path_sequence() -> str:
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="Get Critical Tasks For Period", annotations=ToolAnnotations(readOnlyHint=True))
 def get_critical_tasks_for_period(
     start_date: str,
     end_date: str,
@@ -5447,7 +5519,7 @@ def get_critical_tasks_for_period(
     }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(title="What If Delay", annotations=ToolAnnotations(readOnlyHint=True))
 def what_if_delay(
     unique_id: int,
     delay_days: int = 5,
