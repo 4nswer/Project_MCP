@@ -577,8 +577,8 @@ def update_task(
     task_type:        str = "",
 ) -> str:
     """
-    Update one or more properties of a task identified by UniqueID.
-    Only the fields you provide are changed.
+    Update properties of a single task by UniqueID. Only the fields you provide are changed.
+    For 2+ tasks use bulk_update_tasks (all fields) or bulk_update_rag (RAG status only).
 
     Args:
         unique_id:        Task UniqueID (required).
@@ -755,7 +755,8 @@ def add_task(
     after_unique_id: int = 0,
 ) -> str:
     """
-    Add a new task to the active project.
+    Add a single new task to the active project.
+    For 2+ tasks use bulk_add_tasks — suspends recalculation until all tasks are inserted.
 
     Args:
         name:            Task name (required).
@@ -911,7 +912,8 @@ def delete_task(unique_id: int) -> str:
 @mcp.tool()
 def set_task_mode(unique_id: int, manual: bool = True) -> str:
     """
-    Set a task to manually or automatically scheduled.
+    Set one task to manually or automatically scheduled.
+    For multiple tasks or by scope (all/summary/non_summary) use bulk_set_task_mode.
 
     Args:
         unique_id: Task UniqueID (required).
@@ -985,7 +987,8 @@ def bulk_set_task_mode(updates_json: str) -> str:
 @mcp.tool()
 def set_constraint(unique_id: int, constraint_type: str = "SNET", constraint_date: str = "") -> str:
     """
-    Set a scheduling constraint on a task.
+    Set a scheduling constraint on a single task.
+    For multiple tasks use bulk_set_constraints.
 
     Args:
         unique_id:       Task UniqueID (required).
@@ -1019,6 +1022,61 @@ def set_constraint(unique_id: int, constraint_type: str = "SNET", constraint_dat
             }, indent=2)
 
     return json.dumps({"error": f"Task UniqueID {unique_id} not found."})
+
+
+@mcp.tool()
+def bulk_set_constraints(constraints_json: str) -> str:
+    """
+    Set scheduling constraints on multiple tasks in one call.
+
+    Args:
+        constraints_json: JSON string — list of {unique_id, constraint_type, constraint_date (optional)}.
+            constraint_type: ASAP, ALAP, MSO, MFO, SNET, SNLT, FNET, FNLT.
+            Example: '[{"unique_id": 42, "constraint_type": "SNET", "constraint_date": "2026-09-01"},
+                       {"unique_id": 55, "constraint_type": "ASAP"}]'
+    """
+    CONSTRAINT_MAP = {
+        "ASAP": 0, "ALAP": 1, "MSO": 2, "MFO": 3,
+        "SNET": 4, "SNLT": 5, "FNET": 6, "FNLT": 7,
+    }
+
+    items = json.loads(constraints_json)
+    app   = get_app()
+    proj  = get_proj(app)
+
+    uid_map   = {t.UniqueID: t for t in proj.Tasks if t is not None}
+    updated   = []
+    not_found = []
+    errors    = []
+
+    for item in items:
+        uid = item.get("unique_id")
+        ct  = item.get("constraint_type", "SNET").upper()
+        cd  = item.get("constraint_date", "")
+
+        if ct not in CONSTRAINT_MAP:
+            errors.append({"unique_id": uid, "error": f"Unknown constraint_type '{ct}'"})
+            continue
+
+        t = uid_map.get(uid)
+        if t is None:
+            not_found.append(uid)
+            continue
+
+        t.ConstraintType = CONSTRAINT_MAP[ct]
+        if cd and ct not in ("ASAP", "ALAP"):
+            t.ConstraintDate = _parse_date(cd)
+
+        updated.append({"unique_id": uid, "name": t.Name, "constraint_type": ct,
+                         "constraint_date": cd or "N/A"})
+
+    _save(app)
+    return json.dumps({
+        "updated":   len(updated),
+        "tasks":     updated,
+        "not_found": not_found,
+        "errors":    errors,
+    }, indent=2)
 
 
 @mcp.tool()
@@ -1092,7 +1150,8 @@ def add_predecessor(
     lag_days:              int = 0,
 ) -> str:
     """
-    Add a predecessor link between two tasks.
+    Add a single predecessor link between two tasks.
+    For 2+ links use bulk_add_predecessors — one save round-trip for all links.
 
     Args:
         successor_unique_id:   The task that depends on the predecessor.
@@ -1205,7 +1264,10 @@ def remove_predecessor(
     successor_unique_id:   int,
     predecessor_unique_id: int,
 ) -> str:
-    """Remove a specific predecessor link from a task."""
+    """
+    Remove a specific predecessor link from a single task.
+    For 2+ links use bulk_remove_predecessors — one save round-trip for all removals.
+    """
     app  = get_app()
     proj = get_proj(app)
 
@@ -1235,6 +1297,60 @@ def remove_predecessor(
         "successor":           successor_unique_id,
         "removed_predecessor": predecessor_unique_id,
         "predecessors_now":    succ_task.Predecessors,
+    }, indent=2)
+
+
+@mcp.tool()
+def bulk_remove_predecessors(links_json: str) -> str:
+    """
+    Remove multiple predecessor links in one call.
+
+    Args:
+        links_json: JSON string — list of {successor_unique_id, predecessor_unique_id}.
+            Example: '[{"successor_unique_id": 10, "predecessor_unique_id": 5},
+                       {"successor_unique_id": 12, "predecessor_unique_id": 5}]'
+    """
+    links = json.loads(links_json)
+    app   = get_app()
+    proj  = get_proj(app)
+
+    uid_to_id   = {t.UniqueID: t.ID for t in proj.Tasks if t is not None}
+    uid_to_task = {t.UniqueID: t    for t in proj.Tasks if t is not None}
+
+    removed   = []
+    not_found = []
+    errors    = []
+
+    for link in links:
+        succ_uid = link.get("successor_unique_id")
+        pred_uid = link.get("predecessor_unique_id")
+
+        if succ_uid not in uid_to_id:
+            not_found.append({"successor_unique_id": succ_uid, "error": "not found"})
+            continue
+        if pred_uid not in uid_to_id:
+            not_found.append({"predecessor_unique_id": pred_uid, "error": "not found"})
+            continue
+
+        pred_id   = uid_to_id[pred_uid]
+        succ_task = uid_to_task[succ_uid]
+
+        existing = succ_task.Predecessors.strip()
+        if not existing:
+            errors.append({"successor_unique_id": succ_uid, "error": "task has no predecessors"})
+            continue
+
+        parts    = [p.strip() for p in existing.split(",")]
+        filtered = [p for p in parts if not p.startswith(str(pred_id))]
+        succ_task.Predecessors = ",".join(filtered)
+        removed.append({"successor_unique_id": succ_uid, "removed_predecessor": pred_uid})
+
+    _save(app)
+    return json.dumps({
+        "removed":   len(removed),
+        "links":     removed,
+        "not_found": not_found,
+        "errors":    errors,
     }, indent=2)
 
 
@@ -2292,7 +2408,8 @@ def set_project_calendar(calendar_name: str) -> str:
 @mcp.tool()
 def update_custom_fields(unique_id: int, fields_json: str) -> str:
     """
-    Write any custom field on a task: Text1-30, Number1-20, Date1-10, Flag1-20, Duration1-10.
+    Write any custom field on a single task: Text1-30, Number1-20, Date1-10, Flag1-20, Duration1-10.
+    For multiple tasks use bulk_update_custom_fields.
 
     Args:
         unique_id:   Task UniqueID (required).
@@ -2342,6 +2459,74 @@ def update_custom_fields(unique_id: int, fields_json: str) -> str:
         "name":      t.Name,
         "changed":   changed,
         "errors":    errors,
+    }, indent=2)
+
+
+@mcp.tool()
+def bulk_update_custom_fields(updates_json: str) -> str:
+    """
+    Write custom fields on multiple tasks in one call.
+
+    Args:
+        updates_json: JSON string — list of {unique_id, fields} objects where fields
+            maps field names to values (same as update_custom_fields).
+            Example: '[{"unique_id": 42, "fields": {"Text5": "Phase A", "Number1": 3}},
+                       {"unique_id": 55, "fields": {"Text5": "Phase B", "Flag2": true}}]'
+    """
+    items = json.loads(updates_json)
+    app   = get_app()
+    proj  = get_proj(app)
+    mpd   = _get_mpd(proj)
+
+    uid_map   = {t.UniqueID: t for t in proj.Tasks if t is not None}
+    per_task  = []
+    not_found = []
+
+    for item in items:
+        uid    = item.get("unique_id")
+        fields = item.get("fields", {})
+
+        t = uid_map.get(uid)
+        if t is None:
+            not_found.append(uid)
+            continue
+
+        changed = []
+        errors  = []
+
+        for field_name, value in fields.items():
+            try:
+                _field_id, field_type = _custom_field_id(field_name)
+                prop_name = field_type.capitalize() + field_name[len(field_type):]
+
+                if field_type == "date":
+                    value = _parse_date(value)
+                elif field_type == "flag":
+                    value = bool(value)
+                elif field_type == "duration":
+                    value = float(value) * mpd
+                elif field_type == "number":
+                    value = float(value)
+                else:
+                    value = str(value)
+
+                setattr(t, prop_name, value)
+                changed.append({"field": field_name, "value": str(value)})
+            except Exception as e:
+                errors.append({"field": field_name, "error": str(e)})
+
+        per_task.append({
+            "unique_id": uid,
+            "name":      t.Name,
+            "changed":   changed,
+            "errors":    errors,
+        })
+
+    _save(app)
+    return json.dumps({
+        "updated":   len(per_task),
+        "not_found": not_found,
+        "per_task":  per_task,
     }, indent=2)
 
 
@@ -2724,8 +2909,8 @@ def level_resources() -> str:
 @mcp.tool()
 def set_deadline(unique_id: int, deadline_date: str) -> str:
     """
-    Set a soft deadline on a task. Shows a visual indicator if finish > deadline.
-    Unlike hard constraints, deadlines don't affect scheduling.
+    Set a soft deadline on a single task (visual indicator only, does not affect scheduling).
+    For multiple tasks use bulk_set_deadlines.
 
     Args:
         unique_id:     Task UniqueID (required).
@@ -2772,8 +2957,8 @@ def set_deadline(unique_id: int, deadline_date: str) -> str:
 @mcp.tool()
 def set_task_active(unique_id: int, active: bool = True) -> str:
     """
-    Activate or deactivate a task. Deactivated tasks are excluded from scheduling
-    but remain visible (soft-delete).
+    Activate or deactivate a single task. Deactivated tasks are excluded from scheduling
+    but remain visible (soft-delete). For multiple tasks use bulk_set_task_active.
 
     Args:
         unique_id: Task UniqueID (required).
@@ -2795,6 +2980,53 @@ def set_task_active(unique_id: int, active: bool = True) -> str:
         "name":      t.Name,
         "active":    active,
     }, indent=2)
+
+
+@mcp.tool()
+def bulk_set_task_active(updates_json: str) -> str:
+    """
+    Activate or deactivate multiple tasks in one call. Also accepts a scope shortcut.
+
+    Args:
+        updates_json: JSON string — EITHER a list of {unique_id, active (bool)} objects:
+              '[{"unique_id": 42, "active": false}, {"unique_id": 55, "active": true}]'
+            OR a scope object to act on all matching tasks:
+              '{"active": false, "scope": "all"}'
+              '{"active": false, "scope": "summary"}'
+              '{"active": false, "scope": "non_summary"}'
+    """
+    data = json.loads(updates_json)
+    app  = get_app()
+    proj = get_proj(app)
+
+    updated = 0
+
+    if isinstance(data, dict) and "scope" in data:
+        active = bool(data.get("active", True))
+        scope  = data.get("scope", "all").lower()
+
+        for t in proj.Tasks:
+            if t is None:
+                continue
+            if scope == "all":
+                t.Active = active; updated += 1
+            elif scope == "summary" and t.Summary:
+                t.Active = active; updated += 1
+            elif scope == "non_summary" and not t.Summary:
+                t.Active = active; updated += 1
+
+    else:
+        items   = data if isinstance(data, list) else [data]
+        uid_map = {t.UniqueID: t for t in proj.Tasks if t is not None}
+        for item in items:
+            uid = item["unique_id"]
+            t   = uid_map.get(uid)
+            if t is not None:
+                t.Active = bool(item.get("active", True))
+                updated += 1
+
+    _save(app)
+    return json.dumps({"updated": updated}, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -4165,6 +4397,81 @@ def health_check() -> str:
         result["project_open"] = False
 
     return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def get_tool_guide() -> str:
+    """
+    Routing guide: which tool to call for common PM operations, and when to use bulk tools.
+    Call this before starting any multi-step operation to avoid inefficient single-item loops.
+    """
+    return json.dumps({
+        "efficiency_rules": [
+            "Use bulk_* tools whenever operating on 2+ items in a single intent — they suspend auto-recalculation and use one save round-trip",
+            "Call calculate_project after bulk manual changes if auto-calc was suspended",
+            "Use dry_run_bulk_update to preview changes safely before bulk_update_tasks",
+            "Use undo_last (up to 10) as a safety net after any bulk mutation",
+            "MSPROJECT_SAFE_ROOT must be set in the environment before any file-taking tool will run",
+            "Set MSPROJECT_DRY_RUN=1 to run the server in read/preview-only mode",
+        ],
+        "bulk_pairs": {
+            "create_tasks":        {"single": "add_task",              "bulk": "bulk_add_tasks"},
+            "update_tasks":        {"single": "update_task",           "bulk": "bulk_update_tasks"},
+            "update_rag":          {"single": "update_task",           "bulk": "bulk_update_rag"},
+            "add_links":           {"single": "add_predecessor",       "bulk": "bulk_add_predecessors"},
+            "remove_links":        {"single": "remove_predecessor",    "bulk": "bulk_remove_predecessors"},
+            "set_mode":            {"single": "set_task_mode",         "bulk": "bulk_set_task_mode"},
+            "set_deadlines":       {"single": "set_deadline",          "bulk": "bulk_set_deadlines"},
+            "set_constraints":     {"single": "set_constraint",        "bulk": "bulk_set_constraints"},
+            "activate_tasks":      {"single": "set_task_active",       "bulk": "bulk_set_task_active"},
+            "update_custom_fields":{"single": "update_custom_fields",  "bulk": "bulk_update_custom_fields"},
+            "assign_resources":    {"single": "assign_resource",       "bulk": "bulk_assign_resources"},
+        },
+        "tool_categories": {
+            "project_mgmt":    ["open_project", "new_project", "save_project", "save_project_as",
+                                "close_project", "get_project_info", "set_project_properties",
+                                "list_projects", "switch_project"],
+            "read_tasks":      ["get_tasks", "get_task", "get_critical_path", "get_tasks_by_rag",
+                                "get_overdue_tasks", "get_tasks_by_resource", "search_tasks",
+                                "filter_tasks", "group_tasks_by", "get_wbs_structure",
+                                "get_progress_summary"],
+            "write_tasks":     ["add_task", "bulk_add_tasks", "add_recurring_task",
+                                "update_task", "bulk_update_tasks", "bulk_update_rag",
+                                "delete_task", "move_task", "indent_task", "copy_task_structure",
+                                "set_task_active", "bulk_set_task_active",
+                                "update_custom_fields", "bulk_update_custom_fields"],
+            "scheduling":      ["set_task_mode", "bulk_set_task_mode",
+                                "set_constraint", "bulk_set_constraints",
+                                "set_deadline", "bulk_set_deadlines",
+                                "set_task_calendar", "set_task_hyperlink",
+                                "calculate_project", "clear_estimated_flags"],
+            "dependencies":    ["add_predecessor", "bulk_add_predecessors",
+                                "remove_predecessor", "bulk_remove_predecessors",
+                                "get_task_dependencies", "get_dependency_chain"],
+            "resources":       ["get_resources", "add_resource", "assign_resource",
+                                "bulk_assign_resources", "remove_resource_assignment",
+                                "update_resource", "delete_resource",
+                                "get_resource_workload", "get_resource_availability",
+                                "set_resource_calendar", "get_resource_rate_tables",
+                                "set_resource_rate_table", "level_resources"],
+            "calendars":       ["get_calendars", "create_calendar", "delete_calendar",
+                                "set_calendar_exception", "delete_calendar_exception",
+                                "list_calendar_exceptions", "set_working_hours",
+                                "set_project_calendar"],
+            "analysis":        ["get_schedule_analysis", "validate_schedule",
+                                "get_critical_path_sequence", "get_critical_tasks_for_period",
+                                "what_if_delay", "find_available_slack", "get_constraints",
+                                "get_milestone_report"],
+            "baselines_ev":    ["save_baseline", "clear_baseline", "compare_baselines",
+                                "get_earned_value", "get_variance_report"],
+            "reporting":       ["get_progress_by_wbs", "get_cost_summary", "get_actual_work",
+                                "get_timephased_data", "snapshot_to_json", "snapshot_diff"],
+            "import_export":   ["import_xml", "export_xml", "export_csv", "insert_subproject"],
+            "custom_fields":   ["update_custom_fields", "bulk_update_custom_fields",
+                                "get_custom_field_values", "rename_custom_fields"],
+            "safety":          ["dry_run_bulk_update", "undo_last", "health_check", "get_tool_guide"],
+        },
+    }, indent=2)
 
 
 @mcp.tool()

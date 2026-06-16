@@ -69,7 +69,7 @@ point `MSPROJECT_SAFE_ROOT` at a throwaway directory.
 and now also requires `MSPROJECT_SAFE_ROOT` to point at a writable scratch
 directory with `MSPROJECT_DRY_RUN=0`, since they open and save real files.
 
-## Tool Inventory (99 tools)
+## Tool Inventory (104 tools)
 
 ### Project Management (7)
 
@@ -97,30 +97,34 @@ directory with `MSPROJECT_DRY_RUN=0`, since they open and save real files.
 | `get_progress_summary` | Dashboard: progress, RAG counts, overdue |
 | `get_wbs_structure` | Hierarchical WBS tree |
 
-### Task Mutations (12)
+### Task Mutations (15)
 
 | Tool | Description |
 |------|-------------|
-| `update_task` | Update any task field (incl. priority, task type) |
+| `update_task` | Update a single task's fields (incl. priority, task type) |
 | `bulk_update_rag` | Mass RAG status update |
 | `bulk_update_tasks` | Mass field updates across tasks |
 | `add_task` | Add a single task |
 | `bulk_add_tasks` | Add many tasks at once (JSON array) |
 | `add_recurring_task` | Create recurring task occurrences (daily/weekly/monthly) |
 | `delete_task` | Remove a task |
-| `set_task_mode` | Toggle auto/manual scheduling |
-| `bulk_set_task_mode` | Mass scheduling mode update |
-| `set_constraint` | Set scheduling constraint (ASAP/ALAP/SNET/etc.) |
+| `set_task_mode` | Toggle auto/manual scheduling on one task |
+| `bulk_set_task_mode` | Mass scheduling mode update (list or scope) |
+| `set_constraint` | Set scheduling constraint on one task (ASAP/ALAP/SNET/etc.) |
+| `bulk_set_constraints` | Mass constraint update across tasks |
+| `set_task_active` | Activate/inactivate a single task |
+| `bulk_set_task_active` | Mass activate/inactivate (list or scope) |
 | `clear_estimated_flags` | Clear estimated flag on all tasks |
 | `indent_task` | Indent or outdent a task |
 
-### Dependencies (4)
+### Dependencies (5)
 
 | Tool | Description |
 |------|-------------|
-| `add_predecessor` | Create FS/SS/FF/SF link with optional lag |
+| `add_predecessor` | Create a single FS/SS/FF/SF link with optional lag |
 | `bulk_add_predecessors` | Mass predecessor creation |
-| `remove_predecessor` | Delete a dependency link |
+| `remove_predecessor` | Delete a single dependency link |
+| `bulk_remove_predecessors` | Mass predecessor removal |
 | `get_task_dependencies` | Show predecessors and successors |
 
 ### Resources (7)
@@ -150,12 +154,13 @@ directory with `MSPROJECT_DRY_RUN=0`, since they open and save real files.
 | `get_resource_rate_tables` | Read cost rate tables A-E for a resource |
 | `set_resource_rate_table` | Set or add rate entries in a cost rate table |
 
-### Custom Fields (3)
+### Custom Fields (4)
 
 | Tool | Description |
 |------|-------------|
 | `rename_custom_fields` | Rename Text1-Text30, Number1-Number20, etc. |
-| `update_custom_fields` | Set custom field values on a task |
+| `update_custom_fields` | Set custom field values on a single task |
+| `bulk_update_custom_fields` | Set custom field values across multiple tasks |
 | `get_custom_field_values` | Read all values of a custom field |
 
 ### Import / Export (6)
@@ -246,13 +251,12 @@ directory with `MSPROJECT_DRY_RUN=0`, since they open and save real files.
 | `get_progress_by_wbs` | Completion % rolled up by WBS level |
 | `get_dependency_chain` | Walk predecessor/successor chains |
 
-### Advanced Operations (8)
+### Advanced Operations (7)
 
 | Tool | Description |
 |------|-------------|
-| `set_deadline` | Set deadline indicator on a task |
+| `set_deadline` | Set deadline indicator on a single task |
 | `bulk_set_deadlines` | Mass deadline assignment |
-| `set_task_active` | Activate/inactivate a task |
 | `dry_run_bulk_update` | Preview bulk changes without applying |
 | `move_task` | Reorder a task after another |
 | `copy_task_structure` | Duplicate a task and its subtree |
@@ -274,11 +278,12 @@ directory with `MSPROJECT_DRY_RUN=0`, since they open and save real files.
 | `filter_tasks` | Advanced multi-field filtering |
 | `group_tasks_by` | Group tasks by any field with aggregation |
 
-### Connectivity (1)
+### Connectivity & Navigation (2)
 
 | Tool | Description |
 |------|-------------|
 | `health_check` | Lightweight COM connectivity test — version, project status |
+| `get_tool_guide` | Routing guide: bulk vs single-item tool pairs and category index — call before any multi-step operation |
 
 ## Enriched Task Data
 
@@ -322,7 +327,7 @@ python tests/test_phase7.py     # 57 tests (critical path intelligence, what-if)
 
 ## Architecture
 
-Single-file server (`server.py`, ~5,200 lines) using the FastMCP framework. All COM calls go through `get_app()` / `get_proj()` helpers. Dates are normalized with `_to_naive()` and formatted with `_fmt_date()`.
+Single-file server (`server.py`, ~5,400 lines) using the FastMCP framework. All COM calls go through `get_app()` / `get_proj()` helpers. Dates are normalized with `_to_naive()` and formatted with `_fmt_date()`.
 
 ### Development Phases
 
@@ -334,6 +339,7 @@ Single-file server (`server.py`, ~5,200 lines) using the FastMCP framework. All 
 | 5 | 79 | Bug fixes, cost/work tracking |
 | 6 | 96 | Timephased data, calendar management, resource availability, variance reporting |
 | 7 | 99 | Critical path intelligence: ordered sequence, period filtering, what-if analysis |
+| 8 | 104 | Bulk-operation completeness: 4 new bulk tools + `get_tool_guide` routing meta-tool, docstring redirects on all single-item/bulk pairs |
 
 ## Contributing
 
